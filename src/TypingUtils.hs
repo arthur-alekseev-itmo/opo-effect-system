@@ -112,19 +112,55 @@ instance LeastUpperBound MonoTy where
   lub
     (TyCtor MkTyCtor { name = name1, lt = lt1, args = args1 })
     (TyCtor MkTyCtor { name = name2, lt = lt2, args = args2 })
-    | name1 == name2 && args1 == args2 =
+    | name1 == name2 && args1 == args2 = -- TODO: Subtyping for arguments #AA
       TyCtor MkTyCtor { name = name1, lt = lt1 `lub` lt2, args = args1 }
   lub
     (TyFun MkTyFun { ctx = ctx1, lt = lt1, args = args1, res = res1 })
     (TyFun MkTyFun { ctx = ctx2, lt = lt2, args = args2, res = res2 })
-    | ctx1 == ctx2 && args1 == args2 = -- TODO greatest lower bound
-      TyFun MkTyFun { ctx = ctx1, lt = lt1 `lub` lt2, args = args1, res = res1 `lub` res2 }
+    | ctx1 == ctx2 && length args1 == length args2 =
+      TyFun MkTyFun { ctx = ctx1, lt = lt1 `lub` lt2, args = zipWith glb args1 args2, res = res1 `lub` res2 }
   lub ty1 ty2 =
     let lt = lubAll (ltsOf ty1) `lub` lubAll (ltsOf ty2) in
     TyCtor MkTyCtor { name = "Any", lt, args = [] }
 
 lubAll :: Foldable f => f Lt -> Lt
 lubAll = foldr lub ltFree
+
+
+infix 5 `glb`
+class GreatestLowerBound ty where
+  type GlbC ty :: Constraint
+  glb :: (GlbC ty, HasCallStack) => ty -> ty -> ty
+
+instance GreatestLowerBound Lt where
+  type GlbC Lt = ()
+  glb LtLocal _ = LtLocal
+  glb _ LtLocal = LtLocal
+  glb LtStar _ = LtStar
+  glb _ LtStar = LtStar
+  glb (LtMin names1) (LtMin names2) = LtMin (names1 <> names2)
+
+instance GreatestLowerBound MonoTy where
+  type GlbC MonoTy = (?tyCtx :: TyCtx)
+  glb var@(TyVar name1) (TyVar name2)
+    | name1 == name2 = var
+    | otherwise = ?tyCtx `lookupBound` name1 `glb` ?tyCtx `lookupBound` name2
+  glb
+    (TyCtor MkTyCtor { name = name1, lt = lt1, args = args1 })
+    (TyCtor MkTyCtor { name = name2, lt = lt2, args = args2 })
+    | name1 == name2 && args1 == args2 = -- TODO: Subtyping for arguments #AA
+      TyCtor MkTyCtor { name = name1, lt = lt1 `glb` lt2, args = args1 }
+  glb
+    (TyFun MkTyFun { ctx = ctx1, lt = lt1, args = args1, res = res1 })
+    (TyFun MkTyFun { ctx = ctx2, lt = lt2, args = args2, res = res2 })
+    | ctx1 == ctx2 && length args1 == length args2 =
+      TyFun MkTyFun { ctx = ctx1, lt = lt1 `glb` lt2, args = zipWith lub args1 args2, res = res1 `glb` res2 }
+  glb ty1 ty2 =
+    let lt = glbAll (ty1 `ltsAt` PositivePos) `glb` glbAll (ty2 `ltsAt` PositivePos) in
+    TyCtor MkTyCtor { name = "Bot", lt, args = [] }
+
+glbAll :: Foldable f => f Lt -> Lt
+glbAll = foldr glb ltFree
 
 
 class MonadFresh res m where
