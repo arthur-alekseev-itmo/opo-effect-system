@@ -173,6 +173,8 @@ test-suite colang-test
   type: exitcode-stdio-1.0
   main-is: Spec.hs
   other-modules:
+      SpecTypingUtils
+      Test.Run
       Paths_colang
   autogen-modules:
       Paths_colang
