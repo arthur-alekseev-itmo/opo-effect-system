@@ -134,11 +134,11 @@ class GreatestLowerBound ty where
 
 instance GreatestLowerBound Lt where
   type GlbC Lt = ()
-  glb LtLocal _ = LtLocal
-  glb _ LtLocal = LtLocal
+  glb LtLocal l = l
+  glb l LtLocal = l
   glb LtStar _ = LtStar
   glb _ LtStar = LtStar
-  glb (LtMin names1) (LtMin names2) = LtMin (names1 <> names2)
+  glb _ _ = ltFree
 
 instance GreatestLowerBound MonoTy where
   type GlbC MonoTy = (?tyCtx :: TyCtx)
