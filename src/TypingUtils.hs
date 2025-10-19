@@ -53,9 +53,15 @@ mkSubst2 names1 target1 names2 target2 = do
 
 instance DoSubst target => Apply (Subst target) Lt Lt where
   f @ arg = case arg of
-    LtLocal -> LtLocal
-    LtMin names -> foldr lub ltFree $ (\name -> onLt f name (ltVar name)) <$> Set.toList names
-    LtStar -> LtStar
+    LtMin l r -> LtMin (f @ l) (f @ r)
+    LtMax l r -> LtMax (f @ l) (f @ r)
+    LtVar name -> onLt f name (ltVar name)
+    e -> e
+
+    -- LtLocal -> LtLocal
+    -- LtMin names -> foldr lub ltFree $ (\name -> onLt f name (ltVar name)) <$> Set.toList names
+    -- LtStar -> LtStar
+
 
 instance DoSubst target => Apply (Subst target) MonoTy MonoTy where
   f @ arg = case arg of
@@ -105,7 +111,7 @@ instance LeastUpperBound Lt where
   lub _ LtLocal = LtLocal
   lub LtStar _ = LtStar
   lub _ LtStar = LtStar
-  lub (LtMin names1) (LtMin names2) = LtMin (names1 <> names2)
+  lub l r = LtMin l r
 
 instance LeastUpperBound MonoTy where
   type LubC MonoTy = (?tyCtx :: TyCtx)
@@ -115,7 +121,7 @@ instance LeastUpperBound MonoTy where
   lub
     (TyCtor MkTyCtor { name = name1, lt = lt1, args = args1 })
     (TyCtor MkTyCtor { name = name2, lt = lt2, args = args2 })
-    | name1 == name2 && args1 == args2 = -- TODO: Subtyping for arguments #AA
+    | name1 == name2 && args1 == args2 =
       TyCtor MkTyCtor { name = name1, lt = lt1 `lub` lt2, args = args1 }
   lub
     (TyFun MkTyFun { ctx = ctx1, lt = lt1, args = args1, res = res1 })
@@ -137,11 +143,11 @@ class GreatestLowerBound ty where
 
 instance GreatestLowerBound Lt where
   type GlbC Lt = ()
-  glb LtLocal _ = LtLocal
-  glb _ LtLocal = LtLocal
+  glb LtLocal l = l
+  glb l LtLocal = l
   glb LtStar _ = LtStar
   glb _ LtStar = LtStar
-  glb (LtMin names1) (LtMin names2) = LtMin (names1 <> names2)
+  glb l r = LtMax l r
 
 instance GreatestLowerBound MonoTy where
   type GlbC MonoTy = (?tyCtx :: TyCtx)
@@ -151,7 +157,7 @@ instance GreatestLowerBound MonoTy where
   glb
     (TyCtor MkTyCtor { name = name1, lt = lt1, args = args1 })
     (TyCtor MkTyCtor { name = name2, lt = lt2, args = args2 })
-    | name1 == name2 && args1 == args2 = -- TODO: Subtyping for arguments #AA
+    | name1 == name2 && args1 == args2 =
       TyCtor MkTyCtor { name = name1, lt = lt1 `glb` lt2, args = args1 }
   glb
     (TyFun MkTyFun { ctx = ctx1, lt = lt1, args = args1, res = res1 })
@@ -213,9 +219,9 @@ subTySchemaOf
 
 subLtOf :: (?tyCtx :: TyCtx) => Lt -> Lt -> Bool
 subLtOf = curry \case
-  (LtMin lts1, lt2@(LtMin lts2)) -> flip all lts1 \name ->
-    name `Set.member` lts2 || (?tyCtx `lookupBound` name) `subLtOf` lt2
-  (lt1, lt2) -> lt1 == ltFree || lt2 == LtLocal || lt1 == lt2
+  (LtMin l1 r2, lt2) -> l1 `subLtOf` lt2 && l2 `subLtOf` lt2
+  (LtMin l1 r2, lt2) -> l1 `subLtOf` lt2 || l2 `subLtOf` lt2
+  (lt1, lt2) -> lt1 == LtFree || lt2 == LtLocal || lt1 == lt2
 
 eliminateLts :: Set LtName -> Lt -> Maybe PositionSign -> MonoTy -> MonoTy
 eliminateLts targetNames upperBound currSign = \case
@@ -244,7 +250,7 @@ eliminateLts targetNames upperBound currSign = \case
     approximate = \case
       LtLocal -> LtLocal
       LtStar -> LtStar
-      LtMin (Set.toList -> names) -> lubAll $ map approximateName names
+      LtMin l r -> lubAll $ map approximateName l
 
 paramsToTyCtxEntry :: Bool -> Param -> TyCtxEntry
 paramsToTyCtxEntry contextual MkParam { name, ty }
@@ -297,15 +303,18 @@ class LifetimesAt ty where
     => ty -> PositionSign -> Set Lt
 
 instance LifetimesAt ty => LifetimesAt [ty] where
-  ltsAt tys expectedSign = fold $ tys <&> (`ltsAt` expectedSign)
+  ltsAt tys expectedSign = foldMap (`ltsAt` expectedSign) tys
 
 instance LifetimesAt TySchema where
   ltsAt MkTySchema{ ltParams, tyParams, ty } expectedSign =
     let ?tyCtx = filterVars (each % #name `toSetOf` tyParams) ?tyCtx in
     let lts :: Set Lt = ty `ltsAt` expectedSign in
     flip foldMap lts \case
-      LtMin names -> Set.singleton $ LtMin (names \\ Set.fromList ltParams)
+      LtMin l r -> LtMin $ foldr LtMin ltParams
+      LtVar v -> LtMin v
       lt -> Set.singleton lt
+
+-- LtMin names -> Set.singleton $ LtMin (names \\ Set.fromList ltParams)
 
 instance LifetimesAt MonoTy where
   ltsAt monoTy expectedSign = execWriter $ monoTy `goFrom` PositivePos

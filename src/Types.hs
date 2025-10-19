@@ -20,22 +20,25 @@ type OpName = String
 -- | Lifetimes.
 data Lt
   = LtLocal
-  | LtMin (Set LtName) -- size == 0 ==> LtFree; size == 1 ==> LtVar
+  | LtFree
+  | LtVar LtName
+  | LtMin Lt Lt
+  | LtMax Lt Lt
   | LtStar
   deriving stock (Eq, Ord, Data, Typeable, Generic)
   deriving Out via ShowOut Lt
 
 ltVar :: LtName -> Lt
-ltVar = LtMin . Set.singleton
+ltVar = LtVar
 
 ltLocal :: Lt
 ltLocal = LtLocal
 
 ltFree :: Lt
-ltFree = LtMin Set.empty
+ltFree = LtFree
 
-ltMin :: Foldable f => f LtName -> Lt
-ltMin = LtMin . foldMap Set.singleton
+-- ltMin :: Foldable f => f LtName -> Lt
+-- ltMin = undefined
 
 ltStar :: Lt
 ltStar = LtStar
@@ -43,10 +46,11 @@ ltStar = LtStar
 instance Show Lt where
   show = \case
     LtLocal -> "local"
+    LtFree -> "free"
     LtStar -> "*"
-    LtMin set
-      | null set -> "free"
-      | otherwise -> List.intercalate "+" (Set.toAscList set)
+    LtVar n -> n 
+    LtMin l r -> show l <> "+" <> show r
+    LtMax l r -> show l <> "-" <> show r
 
 data MonoTy = TyVar TyName | TyCtor TyCtor | TyFun TyFun
   deriving stock (Eq, Ord, Data, Typeable, Generic)
