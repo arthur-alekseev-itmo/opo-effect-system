@@ -138,7 +138,7 @@ instance GreatestLowerBound Lt where
   glb l LtLocal = l
   glb LtStar _ = LtStar
   glb _ LtStar = LtStar
-  glb _ _ = ltFree
+  glb (LtMin l) (LtMin r) = LtMin $ Set.intersection l r
 
 instance GreatestLowerBound MonoTy where
   type GlbC MonoTy = (?tyCtx :: TyCtx)
