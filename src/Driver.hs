@@ -84,7 +84,7 @@ typecheck effCtx tyCtx prog = fold . reverse <$> flip evalStateT tyCtx do
       let expr = TLam MkTLam { ltParams, tyParams, body = Lam MkLam { ctxParams, params, body } }
       tySchema <- runExceptT (runFreshT (inferExpr expr)) >>= either error pure
       let actualResTy = #ty % _TyFun % #res `preview` tySchema
-      unless (actualResTy == Just resTy) $
+      unless (maybe False (`subTyOf` resTy) actualResTy) $
         liftIO $ throwIO $ userError $
           "Result type mispatch: expected " <> show resTy <> " but got " <> show actualResTy
       modify (currFun :)
