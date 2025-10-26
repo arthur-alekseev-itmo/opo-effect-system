@@ -54,19 +54,27 @@ inferTLam MkTLam { ltParams, tyParams, body } = do
   pure MkTySchema { ltParams, tyParams, ty }
 
 inferTApp :: TypingCtx m => TApp -> m TySchema
-inferTApp MkTApp { lhs, ltArgs, tyArgs } = do
-  MkTySchema { ltParams, tyParams, ty } <- inferExpr lhs
-  ltSubst <- mkSubst ltParams ltArgs
-  checkBounds ltSubst tyParams
-  tySubst <- mkSubst (each % #name `toListOf` tyParams) tyArgs
-  pure $ emptyTySchema $ tySubst @ (ltSubst @ ty)
-  where
-    checkBounds ltSubst tyParams =
-      forM_ (zip tyParams tyArgs) \(MkTyParam { name, bound }, arg) -> do
-        let bound' = ltSubst @ bound
-        unless (arg `subTyOf` bound') $
-          throwError $ "Type argument " <> show arg <> " is not a subtype of bound "
-            <> show bound' <> " of '" <> name <> "'"
+inferTApp MkTApp { lhs, ltArgs, tyArgs }
+  | null ltArgs = do
+    MkTySchema { ltParams, tyParams, ty } <- inferExpr lhs
+    tySubst <- mkSubst (each % #name `toListOf` tyParams) tyArgs
+    paramSubst <- mkSubst (each % #name `toListOf` tyParams) $ each % #bound `toListOf` tyParams
+    constraints <- collectConstraints False (paramSubst @ ty) (tySubst @ ty)
+    ltSubst <- solveConstraints ltParams constraints
+    pure $ emptyTySchema $ tySubst @ (ltSubst @ ty)
+  | otherwise = do
+    MkTySchema { ltParams, tyParams, ty } <- inferExpr lhs
+    ltSubst <- mkSubst ltParams ltArgs
+    checkBounds ltSubst tyParams
+    tySubst <- mkSubst (each % #name `toListOf` tyParams) tyArgs
+    pure $ emptyTySchema $ tySubst @ (ltSubst @ ty)
+    where
+      checkBounds ltSubst tyParams =
+        forM_ (zip tyParams tyArgs) \(MkTyParam { name, bound }, arg) -> do
+          let bound' = ltSubst @ bound
+          unless (arg `subTyOf` bound') $
+            throwError $ "Type argument " <> show arg <> " is not a subtype of bound "
+              <> show bound' <> " of '" <> name <> "'"
 
 inferLam :: TypingCtx m => Lam -> m TySchema
 inferLam MkLam { ctxParams, params, body } = do
@@ -206,7 +214,6 @@ inferHandle MkHandle { capName, effTy, handler, body } = do
       { name = "resume", tySchema = emptyTySchema $ TyFun MkTyFun
           { ctx = [], lt = ltFree, args = [opResTy], res = resTy }
       }
-
     mkCtxBound name bound = TyCtxTy MkTyParam { name, bound }
 
 checkArgsVs :: TypingCtx m => [MonoTy] -> [MonoTy] -> m ()
@@ -227,3 +234,61 @@ checkEscape res =
 
 mkCtxVar :: TyName -> MonoTy -> TyCtxEntry
 mkCtxVar name ty = TyCtxVar MkTyCtxVar { name, tySchema = emptyTySchema ty }
+
+newtype LtConstraints = LtConstraints (Map.Map LtName LtConstraint)
+data LtConstraint = LtConstraint { subOf :: [Lt], supOf :: [Lt] }
+
+instance Show LtConstraint where
+  show _ = fail "TODO"
+
+collectConstraints :: (TypingCtx m) => Bool -> MonoTy -> MonoTy -> m LtConstraints
+collectConstraints position = curry \case
+  (l, TyVar r) -> do
+    r <- ?tyCtx `lookupBound` r
+    collectConstraints position l r
+  ( TyCtor MkTyCtor { name = "Any", lt = lt1, args = _ },
+    TyCtor MkTyCtor { name = _, lt = lt2, args = _ } ) ->
+    pure $ sub lt1 lt2
+  ( TyCtor MkTyCtor { name = ctor1, lt = lt1, args = args1 },
+    TyCtor MkTyCtor { name = ctor2, lt = lt2, args = args2 } ) -> do
+    -- TODO: Subtypes
+    unless (ctor1 == ctor2) $
+      throwError $ "Constructors don't match: " <> ctor1 <> " and " <> ctor2
+    unless (length args1 == length args2) $
+      throwError $ "Argument count mismatch: " <> show (length args1) <> " and " <> show (length args2)
+    argConstraints <- zipWithM (collectConstraints position) args1 args2
+    foldrM union (sub lt1 lt2) argConstraints
+  ( TyFun MkTyFun { ctx = ctx1, lt = lt1, args = args1, res = res1 },
+    TyFun MkTyFun { ctx = ctx2, lt = lt2, args = args2, res = res2 } ) -> do
+    -- TODO: Subtypes
+    unless (ctx1 == ctx2) $
+      throwError $ "Context mismatch" <> show ctx1 <> " and " <> show ctx2
+    unless (length args1 == length args2) $
+      throwError $ "Argument count mismatch: " <> show (length args1) <> " and " <> show (length args2)
+    -- TODO: Propagate contexts
+    argConstraints <- zipWithM (collectConstraints $ not position) args1 args2
+    resConstraints <- collectConstraints position res1 res2
+    foldrM union (sub lt1 lt2) argConstraints >>= union resConstraints
+  (_, _) -> throwError "Mismatching types"
+  where
+    sub l r = LtConstraints $ case l of
+      (LtMin set) -> case Set.toList set of
+        [l] -> Map.singleton l $ if position then LtConstraint [r] [] else LtConstraint [] [r]
+        _ -> Map.empty
+      _ -> Map.empty
+    union (LtConstraints l) (LtConstraints r) = pure $ LtConstraints $ Map.unionWith addConstraints l r
+    addConstraints (LtConstraint l1 r1) (LtConstraint l2 r2) = LtConstraint (l1 <> l2) (r1 <> r2)
+
+solveConstraints :: (TypingCtx m) => [LtName] -> LtConstraints -> m (Subst Lt)
+solveConstraints params constraints = do
+  results <- mapM (getAns constraints) params
+  mkSubst params results
+  where
+    getAns (LtConstraints constraints) name =
+      maybe (pure ltFree) solveConstraint (constraints !? name)
+    solveConstraint c@(LtConstraint subs sups) = do
+      let super = lubAll sups
+      let sub = glbAll subs
+      unless (super `subLtOf` sub) $
+        throwError $ "Cant solve constraint" <> show c
+      pure sub
