@@ -115,7 +115,7 @@ instance LeastUpperBound MonoTy where
   lub
     (TyCtor MkTyCtor { name = name1, lt = lt1, args = args1 })
     (TyCtor MkTyCtor { name = name2, lt = lt2, args = args2 })
-    | name1 == name2 && args1 == args2 = -- TODO: Subtyping for arguments #AA
+    | name1 == name2 && args1 == args2 =
       TyCtor MkTyCtor { name = name1, lt = lt1 `lub` lt2, args = args1 }
   lub
     (TyFun MkTyFun { ctx = ctx1, lt = lt1, args = args1, res = res1 })
@@ -151,7 +151,7 @@ instance GreatestLowerBound MonoTy where
   glb
     (TyCtor MkTyCtor { name = name1, lt = lt1, args = args1 })
     (TyCtor MkTyCtor { name = name2, lt = lt2, args = args2 })
-    | name1 == name2 && args1 == args2 = -- TODO: Subtyping for arguments #AA
+    | name1 == name2 && args1 == args2 =
       TyCtor MkTyCtor { name = name1, lt = lt1 `glb` lt2, args = args1 }
   glb
     (TyFun MkTyFun { ctx = ctx1, lt = lt1, args = args1, res = res1 })
