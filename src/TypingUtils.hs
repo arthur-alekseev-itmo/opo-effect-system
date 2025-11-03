@@ -54,7 +54,7 @@ mkSubst2 names1 target1 names2 target2 = do
 instance DoSubst target => Apply (Subst target) Lt Lt where
   f @ arg = case arg of
     LtLocal -> LtLocal
-    LtMin names -> foldr lub ltFree $ (\name -> onLt f name (ltVar name)) <$> Set.toList names
+    LtMin names -> foldr (lub . (\name -> onLt f name (ltVar name))) ltFree (Set.toList names)
     LtStar -> LtStar
 
 instance DoSubst target => Apply (Subst target) MonoTy MonoTy where
@@ -297,7 +297,7 @@ class LifetimesAt ty where
     => ty -> PositionSign -> Set Lt
 
 instance LifetimesAt ty => LifetimesAt [ty] where
-  ltsAt tys expectedSign = fold $ tys <&> (`ltsAt` expectedSign)
+  ltsAt tys expectedSign = foldMap (`ltsAt` expectedSign) tys
 
 instance LifetimesAt TySchema where
   ltsAt MkTySchema{ ltParams, tyParams, ty } expectedSign =
