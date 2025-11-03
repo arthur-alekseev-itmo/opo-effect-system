@@ -136,8 +136,6 @@ instance GreatestLowerBound Lt where
   type GlbC Lt = ()
   glb LtLocal l = l
   glb l LtLocal = l
-  glb LtStar _ = LtStar
-  glb _ LtStar = LtStar
   glb (LtMin l) (LtMin r) = LtMin $ Set.intersection l r
 
 instance GreatestLowerBound MonoTy where
@@ -156,7 +154,7 @@ instance GreatestLowerBound MonoTy where
     | ctx1 == ctx2 && length args1 == length args2 =
       TyFun MkTyFun { ctx = ctx1, lt = lt1 `glb` lt2, args = zipWith lub args1 args2, res = res1 `glb` res2 }
   glb ty1 ty2 =
-    let lt = glbAll (ty1 `ltsAt` PositivePos) `glb` glbAll (ty2 `ltsAt` PositivePos) in
+    let lt = glbAll (ltsOf ty1) `glb` glbAll (ltsOf ty2) in
     TyCtor MkTyCtor { name = "Bot", lt, args = [] }
 
 glbAll :: Foldable f => f Lt -> Lt
@@ -291,7 +289,7 @@ class LifetimesOf ty where
     => ty -> Set Lt
 
 instance LifetimesOf ty => LifetimesOf [ty] where
-  ltsOf tys = fold $ ltsOf <$> tys
+  ltsOf = foldMap ltsOf
 
 instance LifetimesOf TySchema where
   ltsOf MkTySchema{ ltParams, tyParams, ty } =
