@@ -1,0 +1,5 @@
+fun three(x): Int'free = 3
+
+let rexplicit = three[]<>()
+let rltinfer = three<>()
+let rtyinfer = three()

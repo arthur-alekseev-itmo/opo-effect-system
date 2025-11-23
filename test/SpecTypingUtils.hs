@@ -11,20 +11,20 @@ import Types
 import Arbitrary.MonoTypes
 
 
-tests :: NamedTests
-tests = []
+tests :: IO NamedTests
+tests = pure []
   -- [ ("GLB Laws", testGlbLaws)
   -- , ("LUB Laws", testLubLaws)
   -- ]
 
-testGlbLaws :: Test
-testGlbLaws = TestList
+testGlbLaws :: IO Test
+testGlbLaws = pure $ TestList
  [ propertyToTest "forall x => glb(x, x) = x" \(x :: MonoTy) -> let ?tyCtx = [] in x `glb` x == x
  , propertyToTest "x <: y => glb(x, y) = x" \(Subtyped (x, y)) -> let ?tyCtx = [] in x `glb` y == x
  ]
 
-testLubLaws :: Test
-testLubLaws = TestList
+testLubLaws :: IO Test
+testLubLaws = pure $ TestList
  [ propertyToTest "x <: y => lub(x, y) = y" \(Subtyped (x, y)) -> let ?tyCtx = [] in x `lub` y == y
  , propertyToTest "forall x => lub(x, x) = x" \(x :: MonoTy) -> let ?tyCtx = [] in x `lub` x == x
  ]

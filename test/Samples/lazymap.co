@@ -1,0 +1,29 @@
+fun id[lr]<a <: Any'lr>(x: a): a = x
+
+data LazyList<a>
+    = LNil
+    | LCons[lh, lt, ll](()'lh -> a, ()'lt -> LazyList<a>'ll)
+
+fun lazyMap
+    [lf, la, lb]<a <: Any'la, b <: Any'lb>
+    (xs: LazyList<a>, f: (a)'lf -> b): LazyList<b>'lf+la =
+    match xs {
+        case LNil() -> LNil<b>()
+        case LCons(h, t) -> LCons[lf+la, lf+la, lf+la]<b>(
+            fun() f(h()),
+            fun() lazyMap[lf, la, lb]<a, b>(t(), f)
+        )
+    }
+
+let rexplicit = lazyMap
+  [free, free, free]
+  <Int'free, Int'free>
+  (LNil<Int'free>(), fun (x: Int'free) id[free]<Int'free>(x))
+
+let rltinfer = lazyMap
+  <Int'free, Int'free>
+  (LNil<Int'free>(), fun (x: Int'free) id[free]<Int'free>(x))
+
+let rtyinfer = lazyMap
+  (LNil<Int'free>(), fun (x: Int'free) id[free]<Int'free>(x))
+

@@ -6,11 +6,11 @@ import SpecInference
 import qualified Data.Foldable as List
 
 
-allTests :: NamedTests
-allTests = List.concat
+allTests :: IO NamedTests
+allTests = mconcat
   [ SpecTypingUtils.tests
   , SpecInference.tests
   ]
 
 main :: IO ()
-main = testMain allTests
+main = allTests >>= testMain

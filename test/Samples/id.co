@@ -1,0 +1,5 @@
+fun id[lr]<a <: Any'lr>(x: a): a = x
+
+let rexplicit = id[free]<Int'free>(3)
+let rltinfer = id<Int'free>(3)
+let rtyinfer = id(3)
