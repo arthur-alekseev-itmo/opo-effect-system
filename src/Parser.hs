@@ -177,8 +177,7 @@ atomWithPostfix = do
   pure $ foldl mkApp target argBlocks
   where
     mkApp target (ltArgs, tyArgs, (ctxArgs, args)) =
-      let callee = if null ltArgs && null tyArgs then target else
-            TApp MkTApp { lhs = target, ltArgs, tyArgs } in
+      let callee = TApp MkTApp { lhs = target, ltArgs, tyArgs } in
       App MkApp { callee, ctxArgs, args }
 
 expr :: Parser Expr

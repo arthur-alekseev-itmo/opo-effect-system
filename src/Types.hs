@@ -81,6 +81,7 @@ instance Show TyFun where
 
 type EffRow = [MonoTy]
 
+
 data TyParam = MkTyParam { name :: TyName, bound :: MonoTy }
   deriving stock (Eq, Ord, Data, Typeable, Generic)
   deriving Out via ShowOut TyParam

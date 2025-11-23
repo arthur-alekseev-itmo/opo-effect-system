@@ -54,7 +54,7 @@ mkSubst2 names1 target1 names2 target2 = do
 instance DoSubst target => Apply (Subst target) Lt Lt where
   f @ arg = case arg of
     LtLocal -> LtLocal
-    LtMin names -> foldr lub ltFree $ (\name -> onLt f name (ltVar name)) <$> Set.toList names
+    LtMin names -> foldr (lub . (\name -> onLt f name (ltVar name))) ltFree (Set.toList names)
 
 instance DoSubst target => Apply (Subst target) MonoTy MonoTy where
   f @ arg = case arg of
@@ -97,12 +97,14 @@ infix 5 `lub`
 class LeastUpperBound ty where
   type LubC ty :: Constraint
   lub :: (LubC ty, HasCallStack) => ty -> ty -> ty
+  lubAll :: (LubC ty, Foldable f, HasCallStack) => f ty -> ty
 
 instance LeastUpperBound Lt where
   type LubC Lt = ()
   lub LtLocal _ = LtLocal
   lub _ LtLocal = LtLocal
   lub (LtMin names1) (LtMin names2) = LtMin (names1 <> names2)
+  lubAll = foldr lub ltFree
 
 instance LeastUpperBound MonoTy where
   type LubC MonoTy = (?tyCtx :: TyCtx)
@@ -122,21 +124,23 @@ instance LeastUpperBound MonoTy where
   lub ty1 ty2 =
     let lt = lubAll (ltsOf ty1) `lub` lubAll (ltsOf ty2) in
     TyCtor MkTyCtor { name = "Any", lt, args = [] }
-
-lubAll :: Foldable f => f Lt -> Lt
-lubAll = foldr lub ltFree
-
+  -- TODO: Proper subtyping??? For glb too
+  lubAll f =
+    if null f then TyCtor MkTyCtor { name = "Bot", lt = ltFree, args = [] }
+    else foldr1 lub f
 
 infix 5 `glb`
 class GreatestLowerBound ty where
   type GlbC ty :: Constraint
   glb :: (GlbC ty, HasCallStack) => ty -> ty -> ty
+  glbAll :: (LubC ty, Foldable f, HasCallStack) => f ty -> ty
 
 instance GreatestLowerBound Lt where
   type GlbC Lt = ()
   glb LtLocal l = l
   glb l LtLocal = l
   glb (LtMin l) (LtMin r) = LtMin $ Set.intersection l r
+  glbAll = foldr glb ltFree
 
 instance GreatestLowerBound MonoTy where
   type GlbC MonoTy = (?tyCtx :: TyCtx)
@@ -156,10 +160,9 @@ instance GreatestLowerBound MonoTy where
   glb ty1 ty2 =
     let lt = glbAll (ltsOf ty1) `glb` glbAll (ltsOf ty2) in
     TyCtor MkTyCtor { name = "Bot", lt, args = [] }
-
-glbAll :: Foldable f => f Lt -> Lt
-glbAll = foldr glb ltFree
-
+  glbAll f =
+    if null f then TyCtor MkTyCtor { name = "Any", lt = ltLocal, args = [] }
+    else foldr1 glb f
 
 class MonadFresh res m where
   fresh :: m res
@@ -173,31 +176,34 @@ instance Monad m => MonadFresh LtName (StateT Int m) where
     modify' (+1)
     pure $ "$l" <> show curr
 
-
 infix 6 `subTyOf`
-subTyOf :: (?tyCtx :: TyCtx) => MonoTy -> MonoTy -> Bool
-subTyOf = curry \case
-  (ty, TyCtor MkTyCtor { name = "Any", lt = lt2 }) ->
-    lubAll (ltsOf ty) `subLtOf` lt2
+class SubTypeOf ty where
+  subTyOf :: (?tyCtx :: TyCtx) => ty -> ty -> Bool
 
-  (TyVar name1, TyVar name2) -> name1 == name2
-  (TyVar name1, ty) -> (?tyCtx `lookupBound` name1) `subTyOf` ty
+instance SubTypeOf MonoTy where
+  subTyOf :: (?tyCtx :: TyCtx) => MonoTy -> MonoTy -> Bool
+  subTyOf = curry \case
+    (ty, TyCtor MkTyCtor { name = "Any", lt = lt2 }) ->
+      lubAll (ltsOf ty) `subTyOf` lt2
 
-  ( TyCtor MkTyCtor { name = ctor1, lt = lt1, args = args1 },
-    TyCtor MkTyCtor { name = ctor2, lt = lt2, args = args2 } ) ->
-    ctor1 == ctor2 && lt1 `subLtOf` lt2 && args1 == args2
+    (TyVar name1, TyVar name2) -> name1 == name2
+    (TyVar name1, ty) -> (?tyCtx `lookupBound` name1) `subTyOf` ty
 
-  ( TyFun MkTyFun { ctx = ctx1, lt = lt1, args = args1, res = res1 },
-    TyFun MkTyFun { ctx = ctx2, lt = lt2, args = args2, res = res2 } ) -> and
-    [ length ctx1 == length ctx2
-    , and $ zipWith subTyOf ctx2 ctx1
-    , length args1 == length args2
-    , and $ zipWith subTyOf args2 args1
-    , lt1 `subLtOf` lt2
-    , res1 `subTyOf` res2
-    ]
+    ( TyCtor MkTyCtor { name = ctor1, lt = lt1, args = args1 },
+      TyCtor MkTyCtor { name = ctor2, lt = lt2, args = args2 } ) ->
+      ctor1 == ctor2 && lt1 `subTyOf` lt2 && args1 == args2
 
-  _ -> False
+    ( TyFun MkTyFun { ctx = ctx1, lt = lt1, args = args1, res = res1 },
+      TyFun MkTyFun { ctx = ctx2, lt = lt2, args = args2, res = res2 } ) -> and
+      [ length ctx1 == length ctx2
+      , and $ zipWith subTyOf ctx2 ctx1
+      , length args1 == length args2
+      , and $ zipWith subTyOf args2 args1
+      , lt1 `subTyOf` lt2
+      , res1 `subTyOf` res2
+      ]
+
+    _ -> False
 
 subTySchemaOf :: TySchema -> TySchema -> Bool
 subTySchemaOf
@@ -206,11 +212,14 @@ subTySchemaOf
   let ?tyCtx = TyCtxTy <$> tyParams2 in
   ltParams1 == ltParams2 && tyParams1 == tyParams2 && ty1 `subTyOf` ty2
 
-subLtOf :: (?tyCtx :: TyCtx) => Lt -> Lt -> Bool
-subLtOf = curry \case
-  (LtMin lts1, lt2@(LtMin lts2)) -> flip all lts1 \name ->
-    name `Set.member` lts2 || (?tyCtx `lookupBound` name) `subLtOf` lt2
-  (lt1, lt2) -> lt1 == ltFree || lt2 == LtLocal || lt1 == lt2
+instance SubTypeOf Lt where
+  subTyOf :: (?tyCtx :: TyCtx) => Lt -> Lt -> Bool
+  subTyOf = curry \case
+    (LtMin lts1, lt2@(LtMin lts2)) -> flip all lts1 \name ->
+      name `Set.member` lts2 || (?tyCtx `lookupBound` name) `subTyOf` lt2
+    (lt1, lt2) -> lt1 == ltFree || lt2 == LtLocal || lt1 == lt2
+
+type TypeType ty = (Show ty, GlbC ty, LubC ty, GreatestLowerBound ty, LeastUpperBound ty, SubTypeOf ty)
 
 eliminateLts :: Set LtName -> Lt -> Maybe PositionSign -> MonoTy -> MonoTy
 eliminateLts targetNames upperBound currSign = \case
