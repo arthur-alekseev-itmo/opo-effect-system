@@ -22,11 +22,9 @@ import GHC.Stack
 import Optics
 import Prelude hiding (lookup)
 import Data.Maybe (fromMaybe)
-
-type TypingCtx m =
-  ( HasCallStack, ?effCtx :: EffCtx, ?tyCtx :: TyCtx
-  , MonadError String m, MonadFresh LtName m
-  )
+import TypingConstraints
+import Data.Coerce
+import Foreign.C (throwErrno)
 
 inferExpr :: TypingCtx m => Expr -> m TySchema
 inferExpr = \case
@@ -55,28 +53,19 @@ inferTLam MkTLam { ltParams, tyParams, body } = do
   pure MkTySchema { ltParams, tyParams, ty }
 
 inferTApp :: TypingCtx m => TApp -> m TySchema
-inferTApp MkTApp { lhs, ltArgs, tyArgs }
-  | null ltArgs = do
-    MkTySchema { ltParams, tyParams, ty } <- inferExpr lhs
-    tySubst <- mkSubst (each % #name `toListOf` tyParams) tyArgs
-    paramSubst <- mkSubst (each % #name `toListOf` tyParams) $ each % #bound `toListOf` tyParams
-    constraints <- collectLtConstraints PositivePos (paramSubst @ ty) (tySubst @ ty)
-    solved <- mapM (solveFor constraints ltFree) ltParams
-    ltSubst <- mkSubst ltParams solved
-    pure $ emptyTySchema $ tySubst @ (ltSubst @ ty)
-  | otherwise = do
-    MkTySchema { ltParams, tyParams, ty } <- inferExpr lhs
-    ltSubst <- mkSubst ltParams ltArgs
-    checkBounds ltSubst tyParams
-    tySubst <- mkSubst (each % #name `toListOf` tyParams) tyArgs
-    pure $ emptyTySchema $ tySubst @ (ltSubst @ ty)
-    where
-      checkBounds ltSubst tyParams =
-        forM_ (zip tyParams tyArgs) \(MkTyParam { name, bound }, arg) -> do
-          let bound' = ltSubst @ bound
-          unless (arg `subTyOf` bound') $
-            throwError $ "Type argument " <> show arg <> " is not a subtype of bound "
-              <> show bound' <> " of '" <> name <> "'"
+inferTApp MkTApp { lhs, ltArgs, tyArgs } = do
+  MkTySchema { ltParams, tyParams, ty } <- inferExpr lhs
+  ltSubst <- mkSubst ltParams ltArgs
+  tySubst <- mkSubst (each % #name `toListOf` tyParams) tyArgs
+  checkBounds ltSubst tyParams
+  pure $ emptyTySchema $ tySubst @ (ltSubst @ ty)
+  where
+    checkBounds ltSubst tyParams =
+      forM_ (zip tyParams tyArgs) \(MkTyParam { name, bound }, arg) -> do
+        let bound' = ltSubst @ bound
+        unless (arg `subTyOf` bound') $
+          throwError $ "Type argument " <> show arg <> " is not a subtype of bound "
+            <> show bound' <> " of '" <> name <> "'"
 
 inferLam :: TypingCtx m => Lam -> m TySchema
 inferLam MkLam { ctxParams, params, body } = do
@@ -114,28 +103,32 @@ inferLam MkLam { ctxParams, params, body } = do
         checkDistinct rest
 
 inferApp :: TypingCtx m => App -> m TySchema
-inferApp MkApp { callee = TApp MkTApp { lhs, ltArgs=[], tyArgs=[] }, ctxArgs, args } = do
-  MkTySchema { ltParams=_, tyParams, ty } <- inferExpr lhs
-  -- TODO! Ctx args #AA
-  argTypes <- mapM (inferExpr >=> ensureMonoTy) args
-  let tprms = Debug.Trace.trace (("TPRMS: " <>) $ show $ each % #name `toListOf` tyParams) (each % #name `toListOf` tyParams)
-  let argtps = Debug.Trace.trace ("ARGTPS: " <> show argTypes) argTypes
-  tySubst <- mkSubst tprms argtps
-  constraints <- collectTyConstraints PositivePos ty (tySubst @ ty)
-  let names = each % #name `toListOf` tyParams 
-  solvedArgs <- mapM (solveFor constraints $ tyAnyOf ltLocal) names
-  let callee = TApp MkTApp { lhs, ltArgs=[], tyArgs=solvedArgs}
-  MkTyFun { ctx = expectedCtxArgs, args = expectedArgs, res } <-
-    inferExpr callee >>= ensureMonoTy >>= \case
+-- TODO: If lt/ty args are given check them against inferred
+inferApp MkApp { callee = TApp MkTApp { lhs }, ctxArgs, args } = do
+  MkTySchema { ltParams, tyParams, ty } <- inferExpr lhs
+  MkTyFun { ctx = expectedCtxArgs, args = params, res } <-
+    case ty of
       TyFun fun -> pure fun
       other -> throwError $ "Expected function, got " <> show other
+  -- TODO: Ctx args #AA
+  inferredArgs <- mapM (inferExpr >=> ensureMonoTy) args
+  constraints <- zipWithM (collectConstraints PositivePos) params inferredArgs <&> mconcat
+  let CombinedConstraints { tyConstraints, ltConstraints } = constraints
+
+  -- TODO: Check bounds of parameters, add them to constraints maybe
+  tyArgs <- mapM (solveFor tyConstraints) (each % #name `toListOf` tyParams) 
+  ltArgs <- mapM (solveFor ltConstraints) ltParams
+
+  ltSubst <- mkSubst ltParams ltArgs
+  tySubst <- mkSubst (each % #name `toListOf` tyParams) tyArgs
+  let deducedRes = ltSubst @ (tySubst @ res)
+
+  -- TODO: Dicuss calling infer tapp for bounds check
   foundCtxArgs <- if not $ null ctxArgs then pure ctxArgs else
     fmap Var <$> ?tyCtx `lookupImplicits` expectedCtxArgs
   actualCtxArgs <- mapM (ensureMonoTy <=< inferExpr) foundCtxArgs
-  actualArgs <- mapM (ensureMonoTy <=< inferExpr) args
   actualCtxArgs `checkArgsVs` expectedCtxArgs
-  actualArgs `checkArgsVs` expectedArgs
-  pure $ emptyTySchema res
+  pure $ emptyTySchema deducedRes
 
 inferApp MkApp { callee, ctxArgs, args } = do
   MkTyFun { ctx = expectedCtxArgs, args = expectedArgs, res } <-
@@ -259,105 +252,3 @@ checkEscape res =
 
 mkCtxVar :: TyName -> MonoTy -> TyCtxEntry
 mkCtxVar name ty = TyCtxVar MkTyCtxVar { name, tySchema = emptyTySchema ty }
-
-newtype TyConstraints n t = TyConstraints (Map.Map n (TyConstraint t))
-data TyConstraint t = TyConstraint { subOf :: [t], supOf :: [t] }
-
-instance (Show t) => Show (TyConstraint t) where
-  show TyConstraint { subOf, supOf } =
-    show subOf <> " <: it <: " <> show supOf
-
-instance (Show n, Show t) => Show (TyConstraints n t) where
-  show (TyConstraints c) =
-    List.intercalate "; " $ List.map (\(k, v) -> show k <> show v) $ Map.toList c
-
-collectLtConstraints :: (TypingCtx m) => PositionSign -> MonoTy -> MonoTy -> m (TyConstraints LtName Lt)
-collectLtConstraints position = curry \case
-  (l, TyVar r) -> do
-    r <- ?tyCtx `lookupBound` r
-    collectLtConstraints position l r
-  ( TyCtor MkTyCtor { name = "Any", lt = lt1, args = _ },
-    TyCtor MkTyCtor { name = _, lt = lt2, args = _ } ) ->
-    pure $ sub lt1 lt2
-  ( TyCtor MkTyCtor { name = ctor1, lt = lt1, args = args1 },
-    TyCtor MkTyCtor { name = ctor2, lt = lt2, args = args2 } ) -> do
-    -- TODO: Subtypes
-    unless (ctor1 == ctor2) $
-      throwError $ "Constructors don't match: " <> ctor1 <> " and " <> ctor2
-    unless (length args1 == length args2) $
-      throwError $ "Argument count mismatch: " <> show (length args1) <> " and " <> show (length args2)
-    argConstraints <- zipWithM (collectLtConstraints position) args1 args2
-    foldrM union (sub lt1 lt2) argConstraints
-  ( TyFun MkTyFun { ctx = ctx1, lt = lt1, args = args1, res = res1 },
-    TyFun MkTyFun { ctx = ctx2, lt = lt2, args = args2, res = res2 } ) -> do
-    -- TODO: Subtypes
-    unless (ctx1 == ctx2) $
-      throwError $ "Context mismatch" <> show ctx1 <> " and " <> show ctx2
-    unless (length args1 == length args2) $
-      throwError $ "Argument count mismatch: " <> show (length args1) <> " and " <> show (length args2)
-    -- TODO: Propagate contexts
-    argConstraints <- zipWithM (collectLtConstraints $ changeSign position) args1 args2
-    resConstraints <- collectLtConstraints position res1 res2
-    foldrM union (sub lt1 lt2) argConstraints >>= union resConstraints
-  (_, _) -> throwError "Mismatching types"
-  where
-    sub l r = TyConstraints $ case l of
-      (LtMin set) -> case Set.toList set of
-        [l] -> Map.singleton l $ if position == PositivePos
-          then TyConstraint [r] []
-          else TyConstraint [] [r]
-        _ -> Map.empty
-      _ -> Map.empty
-    union (TyConstraints l) (TyConstraints r) = pure $ TyConstraints $ Map.unionWith addConstraints l r
-    addConstraints (TyConstraint l1 r1) (TyConstraint l2 r2) = TyConstraint (l1 <> l2) (r1 <> r2)
-
-collectTyConstraints :: (TypingCtx m) => PositionSign -> MonoTy -> MonoTy -> m (TyConstraints TyName MonoTy)
-collectTyConstraints position = curry \case
-  (l, TyVar r) -> do
-    r <- ?tyCtx `lookupBound` r
-    collectTyConstraints position l r
-  ( TyCtor MkTyCtor { name = ctor1, lt = _, args = args1 },
-    TyCtor MkTyCtor { name = ctor2, lt = _, args = args2 } ) -> do
-    -- TODO: Subtypes
-    unless (ctor1 == ctor2) $
-      throwError $ "Constructors don't match: " <> ctor1 <> " and " <> ctor2
-    unless (length args1 == length args2) $
-      throwError $ "Argument count mismatch: " <> show (length args1) <> " and " <> show (length args2)
-    argConstraints <- zipWithM (collectTyConstraints position) args1 args2
-    foldrM union empty argConstraints
-  ( TyFun MkTyFun { ctx = ctx1, lt = _, args = args1, res = res1 },
-    TyFun MkTyFun { ctx = ctx2, lt = _, args = args2, res = res2 } ) -> do
-    -- TODO: Subtypes
-    unless (ctx1 == ctx2) $
-      throwError $ "Context mismatch" <> show ctx1 <> " and " <> show ctx2
-    unless (length args1 == length args2) $
-      throwError $ "Argument count mismatch: " <> show (length args1) <> " and " <> show (length args2)
-    -- TODO: Propagate contexts
-    argConstraints <- zipWithM (collectTyConstraints $ changeSign position) args1 args2
-    resConstraints <- collectTyConstraints position res1 res2
-    foldrM union resConstraints argConstraints
-  (TyVar l, t) -> do
-    sub l t
-  (_, _) -> throwError "Mismatching types"
-  where
-    sub l r =  pure $ TyConstraints $ Map.singleton l $ 
-      if position == PositivePos
-        then TyConstraint [r] []
-        else TyConstraint [] [r]
-    union (TyConstraints l) (TyConstraints r) = pure $ TyConstraints $ Map.unionWith addConstraints l r
-    empty = TyConstraints Map.empty
-    addConstraints (TyConstraint l1 r1) (TyConstraint l2 r2) = TyConstraint (l1 <> l2) (r1 <> r2)
-
-solveConstraint :: (TypeType ty, TypingCtx m) => TyConstraint ty -> m ty
-solveConstraint c@(TyConstraint subs sups) = do
-  let super = lubAll sups
-  let sub = glbAll subs
-  Debug.Trace.trace (show super) $
-    Debug.Trace.trace (show sub) $
-      unless (super `subTyOf` sub) $ throwError $ "Cant solve constraint" <> show c
-  pure sub
-
-solveFor :: (TypeType ty, TypingCtx m, Ord n) => TyConstraints n ty -> ty -> n -> m ty
-solveFor (TyConstraints constraints) defaultTy name = do
-  let solved = solveConstraint <$> constraints !? name
-  fromMaybe (pure defaultTy) solved

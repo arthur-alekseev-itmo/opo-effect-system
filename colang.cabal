@@ -32,6 +32,7 @@ library
       Syntax
       Types
       Typing
+      TypingConstraints
       TypingCtx
       TypingUtils
   other-modules:

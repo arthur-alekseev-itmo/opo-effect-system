@@ -52,6 +52,7 @@ mkSubst2 names1 target1 names2 target2 = do
   pure $ Subst $ Map.fromList $ zip names1 target1 ++ zip names2 target2
 
 instance DoSubst target => Apply (Subst target) Lt Lt where
+  (@) :: DoSubst target => Subst target -> Lt -> Lt
   f @ arg = case arg of
     LtLocal -> LtLocal
     LtMin names -> foldr (lub . (\name -> onLt f name (ltVar name))) ltFree (Set.toList names)
@@ -126,7 +127,7 @@ instance LeastUpperBound MonoTy where
     TyCtor MkTyCtor { name = "Any", lt, args = [] }
   -- TODO: Proper subtyping??? For glb too
   lubAll f =
-    if null f then TyCtor MkTyCtor { name = "Bot", lt = ltFree, args = [] }
+    if null f then TyCtor MkTyCtor { name = "Any", lt = ltLocal, args = [] }
     else foldr1 lub f
 
 infix 5 `glb`
@@ -161,20 +162,11 @@ instance GreatestLowerBound MonoTy where
     let lt = glbAll (ltsOf ty1) `glb` glbAll (ltsOf ty2) in
     TyCtor MkTyCtor { name = "Bot", lt, args = [] }
   glbAll f =
-    if null f then TyCtor MkTyCtor { name = "Any", lt = ltLocal, args = [] }
+    if null f then TyCtor MkTyCtor { name = "Bot", lt = ltFree, args = [] }
     else foldr1 glb f
-
-class MonadFresh res m where
-  fresh :: m res
 
 runFreshT :: Functor m => StateT Int m a -> m a
 runFreshT = fmap fst . flip runStateT 0
-
-instance Monad m => MonadFresh LtName (StateT Int m) where
-  fresh = do
-    curr <- get
-    modify' (+1)
-    pure $ "$l" <> show curr
 
 infix 6 `subTyOf`
 class SubTypeOf ty where
@@ -219,7 +211,7 @@ instance SubTypeOf Lt where
       name `Set.member` lts2 || (?tyCtx `lookupBound` name) `subTyOf` lt2
     (lt1, lt2) -> lt1 == ltFree || lt2 == LtLocal || lt1 == lt2
 
-type TypeType ty = (Show ty, GlbC ty, LubC ty, GreatestLowerBound ty, LeastUpperBound ty, SubTypeOf ty)
+type TypeType ty = (Show ty, GlbC ty, LubC ty, GreatestLowerBound ty, LeastUpperBound ty, SubTypeOf ty, Top ty)
 
 eliminateLts :: Set LtName -> Lt -> Maybe PositionSign -> MonoTy -> MonoTy
 eliminateLts targetNames upperBound currSign = \case
@@ -244,6 +236,7 @@ eliminateLts targetNames upperBound currSign = \case
         Nothing -> error "Cannot leak existential lifetime"
         Just PositivePos -> upperBound
         Just NegativePos -> ltFree
+        Just InvariantPos -> error "TODO" -- TODO
 
     approximate = \case
       LtLocal -> LtLocal
@@ -282,10 +275,13 @@ freeVarsOf = \case
       freeVarsOf body \\ Set.fromList ("resume" : paramNames)
   other -> error $ "unsupported free vars " <> show other
 
-data PositionSign = PositivePos | NegativePos deriving Eq
+data PositionSign = PositivePos | NegativePos | InvariantPos deriving Eq
 
 changeSign :: PositionSign -> PositionSign
-changeSign = \case PositivePos -> NegativePos; NegativePos -> PositivePos
+changeSign = \case
+  PositivePos -> NegativePos
+  NegativePos -> PositivePos
+  InvariantPos -> InvariantPos
 
 freeLtVarsOf
   :: (HasCallStack, ?tyCtx :: TyCtx)

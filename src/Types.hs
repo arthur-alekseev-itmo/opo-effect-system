@@ -126,6 +126,8 @@ instance Top TyCtor where
   top = tyAnyOf LtLocal
 instance Top MonoTy where
   top = TyCtor top
+instance Top Lt where
+  top = LtLocal
 
 class AnyOf ty where
   tyAnyOf :: Lt -> ty
