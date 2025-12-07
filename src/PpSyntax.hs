@@ -18,12 +18,12 @@ ppGExprInner pp = \case
   TApp tapp -> ppTApp pp tapp
   Lam lam -> ppLam pp lam
   App app -> ppApp pp app
-  CapCtor ctor -> ppCapCtor pp ctor
+  Match match -> ppMatch pp match
   _ -> error "TODO"
 
 ppTLam :: (expr -> String) -> GTLam expr -> String
 ppTLam pp MkTLam { ltParams, tyParams, body } =
-  pp body <> lts <> tys
+  "Tfun" <> lts <> tys <> pp body
   where
     tys = "<" <> List.intercalate ", " (map show tyParams) <> ">" 
     lts = "[" <> List.intercalate ", " ltParams <> "]" 
@@ -37,7 +37,7 @@ ppTApp pp MkTApp { lhs, ltArgs, tyArgs } =
 
 ppCapCtor :: (expr -> String) -> GCapCtor expr -> String
 ppCapCtor pp MkCapCtor { name, tyArgs, marker, handler } =
-  error "TODO"
+  error "TODO CC"
 
 ppLam :: (expr -> String) -> GLam expr -> String
 ppLam pp MkLam { ctxParams, params, body } =
@@ -55,3 +55,13 @@ ppApp pp MkApp { callee, ctxArgs, args } =
 
 ppParam :: Param -> String
 ppParam MkParam { name, ty } = name <> ": " <> show ty
+
+ppMatch :: (expr -> String) -> GMatch expr -> String
+ppMatch pp MkMatch { scrutinee, branches } =
+  "match " <> pp scrutinee <> cases
+  where
+    cases = " (" <> List.intercalate "\n" (map (ppBranch pp) branches) <> ")" 
+
+ppBranch :: (expr -> String) -> GBranch expr -> String
+ppBranch pp MkBranch { ctorName, varPatterns, body } =
+  ctorName <> "(" <> List.intercalate ", " varPatterns <> ") -> " <> pp body 
