@@ -26,6 +26,7 @@ import TypingConstraints
 import Data.Coerce
 import Foreign.C (throwErrno)
 import PpSyntax (ppTypedExpr, ppExpr)
+import Data.Foldable (Foldable(length))
 
 type Inferred = (TySchema, TypedExpr)
 
@@ -54,11 +55,11 @@ inferExprInner (GExpr { expr, ty=() }) = case expr of
 
 inferExpr :: TypingCtx m => Expr -> m Inferred
 inferExpr expr = do
-  Debug.Trace.traceM "\nGOT:"
-  Debug.Trace.traceM (ppExpr expr)
+  let spaces = replicate (length $ getCallStack callStack) ' '
+  let print a b = Debug.Trace.traceM $ spaces <> a <> b
+  print "-> " $ ppExpr expr
   result <- inferExprInner expr
-  Debug.Trace.traceM "MADE:"
-  Debug.Trace.traceM (ppTypedExpr $ snd result)
+  print "<- " $ ppTypedExpr $ snd result
   pure result
 
 inferConst :: (TypingCtx m) => Int -> m Inferred

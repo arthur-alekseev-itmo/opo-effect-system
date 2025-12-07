@@ -30,7 +30,7 @@ ppTLam pp MkTLam { ltParams, tyParams, body } =
 
 ppTApp :: (expr -> String) -> GTApp expr -> String
 ppTApp pp MkTApp { lhs, ltArgs, tyArgs } =
-  lts <> tys <> pp lhs
+  pp lhs <> lts <> tys
   where
     tys = "<" <> List.intercalate ", " (map show tyArgs) <> ">" 
     lts = "[" <> List.intercalate ", " (map show ltArgs) <> "]" 

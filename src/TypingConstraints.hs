@@ -14,7 +14,6 @@ import TypingCtx
 import Data.Coerce
 import qualified Debug.Trace
 
-
 newtype TyConstraints n t = TyConstraints (Map n (TyConstraint t))
 data TyConstraint t = TyConstraint { subOf :: [t], supOf :: [t] }
 
