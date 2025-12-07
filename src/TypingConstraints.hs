@@ -107,10 +107,10 @@ collectConstraints position par arg = do
 
 solveConstraint :: (TypeType ty, TypingCtx m) => TyConstraint ty -> m ty
 solveConstraint c@(TyConstraint subs sups) = do
-  let super = Debug.Trace.traceWith (\x -> "SUP:" <> show x) $ lubAll sups
-  let sub = Debug.Trace.traceWith (\x -> "SUB:" <> show x) $ glbAll subs
+  let super = lubAll sups
+  let sub = glbAll subs
   unless (sub `subTyOf` super) $ throwError $ "Cant solve constraint" <> show c
-  pure $ Debug.Trace.traceWith (\x -> "RES:" <> show x <> "\n") $ case (subs, sups) of
+  pure $ case (subs, sups) of
     ([], _ : _) -> super
     _ -> sub
 

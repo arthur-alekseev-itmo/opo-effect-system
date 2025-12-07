@@ -25,6 +25,7 @@ import Data.Maybe (fromMaybe)
 import TypingConstraints
 import Data.Coerce
 import Foreign.C (throwErrno)
+import PpSyntax (ppTypedExpr, ppExpr)
 
 type Inferred = (TySchema, TypedExpr)
 
@@ -36,8 +37,10 @@ ensureMonoTyInf (ty, expr) = do
   ty <- ensureMonoTy ty
   pure (ty, expr)
 
-inferExpr :: TypingCtx m => Expr -> m Inferred
-inferExpr (GExpr { expr }) = case expr of
+
+
+inferExprInner :: TypingCtx m => Expr -> m Inferred
+inferExprInner (GExpr { expr, ty=() }) = case expr of
   Const i -> inferConst i
   Var name -> inferVar name
   TLam tlam -> inferTLam tlam
@@ -48,6 +51,15 @@ inferExpr (GExpr { expr }) = case expr of
   Perform perform -> inferPerform perform
   Handle handle -> inferHandle handle
   unsupported -> error $ "Unsupported construct: " <> show unsupported
+
+inferExpr :: TypingCtx m => Expr -> m Inferred
+inferExpr expr = do
+  Debug.Trace.traceM "\nGOT:"
+  Debug.Trace.traceM (ppExpr expr)
+  result <- inferExprInner expr
+  Debug.Trace.traceM "MADE:"
+  Debug.Trace.traceM (ppTypedExpr $ snd result)
+  pure result
 
 inferConst :: (TypingCtx m) => Int -> m Inferred
 inferConst i =
@@ -123,7 +135,7 @@ inferLam MkLam { ctxParams, params, body } = do
 
 inferApp :: TypingCtx m => App -> m Inferred
 -- TODO: If lt/ty args are given check them against inferred!! #AA
-inferApp MkApp { callee = GExpr { expr = TApp MkTApp { lhs, ltArgs = [], tyArgs = []} }, ctxArgs, args } = do
+inferApp MkApp { callee = GExpr { expr = TApp MkTApp { lhs, ltArgs, tyArgs} }, ctxArgs, args } = do
   (lhsSchema@MkTySchema { ltParams, tyParams, ty }, lhsExpr) <- inferExpr lhs
   MkTyFun { ctx = expectedCtxArgs, args = params, res } <-
     case ty of
@@ -228,52 +240,52 @@ inferPerform MkPerform { opName, cap, tyArgs = opTyArgs, args } = do
 inferHandle :: TypingCtx m => Handle -> m Inferred
 inferHandle MkHandle { capName, effTy, handler, body } = do
   undefined
-  -- let MkTyCtor { name = effName, args = effTyArgs } = effTy
-  -- unless (#lt % only LtLocal `has` effTy) $
-  --   throwError "Capabilities can only have local lifetime"
+  let MkTyCtor { name = effName, args = effTyArgs } = effTy
+  unless (#lt % only LtLocal `has` effTy) $
+    throwError "Capabilities can only have local lifetime"
 
-  -- let capCtx = TyCtxCap MkTyCtxCap { name = capName, monoTy = TyCtor effTy }
-  -- (resTy, resExpr) <- let ?tyCtx = capCtx : ?tyCtx in inferExpr body >>= ensureMonoTyInf
-  -- checkEscape resTy
+  let capCtx = TyCtxCap MkTyCtxCap { name = capName, monoTy = TyCtor effTy }
+  (resTy, resExpr) <- let ?tyCtx = capCtx : ?tyCtx in inferExpr body >>= ensureMonoTyInf
+  checkEscape resTy
 
-  -- MkEffCtxEntry { tyParams = effTyParams, ops } <- ?effCtx `lookup` effName
-  -- effSubst <- mkSubst effTyParams effTyArgs
-  -- unless (length handler == Map.size ops) $
-  --   throwError "Wrong number of implemented operations"
-  -- forM_ handler \MkHandlerEntry { opName, tyParams = opDefTyParams, paramNames, body } -> do
-  --   MkOpSig { tyParams = opSigTyParams, args, res = opResTy } <-
-  --     case ops !? opName of
-  --       Nothing -> throwError $ "Operation " <> opName <> " is not specified for effect " <> effName
-  --       Just sig -> pure $ effSubst @ sig
-  --   let opTyParams = if not $ null opDefTyParams then opDefTyParams else
-  --         replicate (length opSigTyParams) "_"
-  --   opSubst <- mkSubst opSigTyParams (TyVar <$> opTyParams)
-  --   let args' = opSubst @ args
-  --   unless (length paramNames == length args') $
-  --     throwError "Operation parameter number mismatch"
-  --   unless (ltFree == lubAll (ltsOf args')) $
-  --     throwError $ "Capabilities can leak through '" <> opName <> "' operation parameters"
-  --   let tyBoundsCtx = opTyParams <&> (`mkCtxBound` tyAnyOf ltFree)
-  --   let opParamCtx = zipWith mkCtxVar paramNames args'
-  --   let resumeCtx = mkResume (opSubst @ opResTy) resTy
-  --   let body = undefined
-  --   (opRetTy, opRetExpr) <- let ?tyCtx = resumeCtx : tyBoundsCtx ++ opParamCtx ++ ?tyCtx in
-  --     inferExpr (effSubst @ body) >>= ensureMonoTyInf
-  --   unless (Set.fromList opTyParams `Set.disjoint` freeTyVars opRetTy) $
-  --     throwError $ "Operation " <> opName <> " type parameters should not leak with return"
-  --   unless (opRetTy `subTyOf` resTy) $
-  --     throwError $ "Operation " <> opName <> " return type " <> show opRetTy
-  --       <> " is not a sustype of " <> show resTy
-  -- -- SUPER TODO: #AA
-  -- let expr = undefined 
-  -- -- Handle MkHandle { capName, effTy, handler, body }
-  -- withType (emptyTySchema resTy) expr
-  -- where
-  --   mkResume opResTy resTy = TyCtxVar MkTyCtxVar
-  --     { name = "resume", tySchema = emptyTySchema $ TyFun MkTyFun
-  --         { ctx = [], lt = ltFree, args = [opResTy], res = resTy }
-  --     }
-  --   mkCtxBound name bound = TyCtxTy MkTyParam { name, bound }
+  MkEffCtxEntry { tyParams = effTyParams, ops } <- ?effCtx `lookup` effName
+  effSubst <- mkSubst effTyParams effTyArgs
+  unless (length handler == Map.size ops) $
+    throwError "Wrong number of implemented operations"
+  handlers <- forM handler \MkHandlerEntry { opName, tyParams = opDefTyParams, paramNames, body } -> do
+    MkOpSig { tyParams = opSigTyParams, args, res = opResTy } <-
+      case ops !? opName of
+        Nothing -> throwError $ "Operation " <> opName <> " is not specified for effect " <> effName
+        Just sig -> pure $ effSubst @ sig
+    let opTyParams = if not $ null opDefTyParams then opDefTyParams else
+          replicate (length opSigTyParams) "_"
+    opSubst <- mkSubst opSigTyParams (TyVar <$> opTyParams)
+    let args' = opSubst @ args
+    unless (length paramNames == length args') $
+      throwError "Operation parameter number mismatch"
+    unless (ltFree == lubAll (ltsOf args')) $
+      throwError $ "Capabilities can leak through '" <> opName <> "' operation parameters"
+    let tyBoundsCtx = opTyParams <&> (`mkCtxBound` tyAnyOf ltFree)
+    let opParamCtx = zipWith mkCtxVar paramNames args'
+    let resumeCtx = mkResume (opSubst @ opResTy) resTy
+    (opRetTy, opRetExpr) <- let ?tyCtx = resumeCtx : tyBoundsCtx ++ opParamCtx ++ ?tyCtx in
+      inferExpr (effSubst @ body) >>= ensureMonoTyInf
+    unless (Set.fromList opTyParams `Set.disjoint` freeTyVars opRetTy) $
+      throwError $ "Operation " <> opName <> " type parameters should not leak with return"
+    unless (opRetTy `subTyOf` resTy) $
+      throwError $ "Operation " <> opName <> " return type " <> show opRetTy
+        <> " is not a sustype of " <> show resTy
+    let expr = undefined -- monoTyped opRetTy $ HandlerEntry MkHandlerEntry { opName, tyParams = opDefTyParams, paramNames, body=opRetExpr }
+    withType (emptyTySchema opRetTy) expr
+  -- SUPER TODO: #AA
+  let expr = monoTyped resTy $ Handle MkHandle { capName, effTy, handler=undefined, body=resExpr }
+  withType (emptyTySchema resTy) expr
+  where
+    mkResume opResTy resTy = TyCtxVar MkTyCtxVar
+      { name = "resume", tySchema = emptyTySchema $ TyFun MkTyFun
+          { ctx = [], lt = ltFree, args = [opResTy], res = resTy }
+      }
+    mkCtxBound name bound = TyCtxTy MkTyParam { name, bound }
 
 checkArgsVs :: TypingCtx m => [MonoTy] -> [MonoTy] -> m ()
 checkArgsVs actualArgs expectedArgs = do
