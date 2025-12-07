@@ -66,8 +66,8 @@ instance DoSubst target => Apply (Subst target) MonoTy MonoTy where
 instance DoSubst target => Apply (Subst target) TyCtor TyCtor where
   f @ MkTyCtor { name, lt, args } = MkTyCtor { name, lt = f @ lt, args = f @ args }
 
-instance DoSubst target => Apply (Subst target) Expr Expr where
-  f @ arg = case arg of
+instance {-# OVERLAPPING #-} DoSubst target => Apply (Subst target) Expr Expr where
+  f @ (GExpr { expr = arg, ty }) = typedGen ty $ case arg of
     Const _ -> arg
     Plus lhs rhs -> Plus (f @ lhs) (f @ rhs)
     Var _ -> arg
@@ -80,17 +80,19 @@ instance DoSubst target => Apply (Subst target) Expr Expr where
     Perform MkPerform { opName, cap, tyArgs, args } -> Perform MkPerform { opName, cap = f @ cap, tyArgs = f @ tyArgs, args = f @ args }
     Handle MkHandle { capName, effTy, handler, body } -> Handle MkHandle { capName, effTy = f @ effTy, handler = f @ handler, body = f @ body }
     RtHandler MkRtHandler { marker, body } -> RtHandler MkRtHandler { marker, body = f @ body }
+    
 
-instance DoSubst target => Apply (Subst target) HandlerEntry HandlerEntry where
+
+instance {-# OVERLAPPING #-} DoSubst target => Apply (Subst target) HandlerEntry HandlerEntry where
   f @ MkHandlerEntry { opName, tyParams, paramNames, body } = MkHandlerEntry { opName, tyParams, paramNames, body = f @ body } -- todo
 
-instance DoSubst target => Apply (Subst target) Param Param where
+instance {-# OVERLAPPING #-} DoSubst target => Apply (Subst target) Param Param where
   f @ MkParam { name, ty } = MkParam { name, ty = f @ ty }
 
-instance DoSubst target => Apply (Subst target) Branch Branch where
+instance {-# OVERLAPPING #-} DoSubst target => Apply (Subst target) Branch Branch where
   f @ MkBranch { ctorName, varPatterns, body } = MkBranch { ctorName, varPatterns, body = f @ body }
 
-instance DoSubst target => Apply (Subst target) OpSig OpSig where
+instance {-# OVERLAPPING #-} DoSubst target => Apply (Subst target) OpSig OpSig where
   f @ MkOpSig { tyParams, args, res } = MkOpSig { tyParams, args, res = f @ res } -- TODO
 
 
@@ -253,7 +255,7 @@ ensureMonoTy = \case
   schema -> throwError $ "Expected mono type, got " <> show schema <> " at\n" <> prettyCallStack callStack
 
 freeVarsOf :: HasCallStack => Expr -> Set VarName
-freeVarsOf = \case
+freeVarsOf (GExpr { expr = arg }) = case arg of
   Const _ -> Set.empty
   Plus lhs rhs -> freeVarsOf lhs <> freeVarsOf rhs
   Var name -> Set.singleton name

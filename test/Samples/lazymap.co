@@ -22,8 +22,8 @@ let rexplicit = lazyMap
 
 let rltinfer = lazyMap
   <Int'free, Int'free>
-  (LNil<Int'free>(), fun (x: Int'free) id[free]<Int'free>(x))
+  (LNil<Int'free>(), fun (x: Int'free) id<Int'free>(x))
 
 let rtyinfer = lazyMap
-  (LNil<Int'free>(), fun (x: Int'free) id[free]<Int'free>(x))
+  (LNil<Int'free>(), fun (x: Int'free) id(x))
 

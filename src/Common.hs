@@ -43,5 +43,5 @@ class From from to where
 class Apply f arg res | f arg -> res where
   (@) :: f -> arg -> res
 
-instance (Apply f arg res, Functor collection) => Apply f (collection arg) (collection res) where
+instance {-# OVERLAPPABLE #-} (Apply f arg res, Functor collection) => Apply f (collection arg) (collection res) where
   f @ args = fmap (f @) args

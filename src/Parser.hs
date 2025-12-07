@@ -155,10 +155,10 @@ tySchema = do
 atom :: Parser Expr
 atom =
   inParens expr <|>
-  Match <$> match <|>
-  Const <$> number <|>
-  Var <$> varName <|>
-  Var <$> ctorName
+  (untyped . Match <$> match) <|>
+  (untyped . Const <$> number) <|>
+  (untyped . Var <$> varName) <|>
+  (untyped . Var <$> ctorName)
 
 atomWithPostfix :: Parser Expr
 atomWithPostfix = do
@@ -177,15 +177,15 @@ atomWithPostfix = do
   pure $ foldl mkApp target argBlocks
   where
     mkApp target (ltArgs, tyArgs, (ctxArgs, args)) =
-      let callee = TApp MkTApp { lhs = target, ltArgs, tyArgs } in
-      App MkApp { callee, ctxArgs, args }
+      let callee = untyped $ TApp MkTApp { lhs = target, ltArgs, tyArgs } in
+      untyped $ App MkApp { callee, ctxArgs, args }
 
 expr :: Parser Expr
 expr =
   fun <|>
   letIn <|>
-  Perform <$> perform <|>
-  Handle <$> handle <|>
+  (untyped . Perform <$> perform) <|>
+  (untyped . Handle <$> handle) <|>
   atomWithPostfix
 
 fun :: Parser Expr
@@ -198,9 +198,9 @@ fun = do
   tyParams <- option [] $ inAngles $ list (tok ",") tyParam
   params <- inParens $ list (tok ",") paramFree
   body <- expr
-  let lam = Lam MkLam { ctxParams, params, body }
+  let lam = untyped $ Lam MkLam { ctxParams, params, body }
   pure $ if null ltParams && null tyParams then lam else
-    TLam MkTLam { ltParams, tyParams, body = lam }
+    untyped $ TLam MkTLam { ltParams, tyParams, body = lam }
 
 letIn :: Parser Expr
 letIn = do
@@ -212,8 +212,8 @@ letIn = do
   e <- expr
   tok "in"
   body <- expr
-  pure $ App MkApp
-    { callee = Lam MkLam { ctxParams = [], params = [MkParam { name, ty }], body }
+  pure $ untyped $ App MkApp
+    { callee = untyped $ Lam MkLam { ctxParams = [], params = [MkParam { name, ty }], body }
     , ctxArgs = [], args = [e]
     }
 

@@ -26,9 +26,19 @@ import TypingConstraints
 import Data.Coerce
 import Foreign.C (throwErrno)
 
-inferExpr :: TypingCtx m => Expr -> m TySchema
-inferExpr = \case
-  Const _ -> pure inferConst
+type Inferred = (TySchema, TypedExpr)
+
+withType :: (Monad m) => TySchema -> TypedExpr -> m Inferred
+withType ty expr = pure (ty, expr)
+
+ensureMonoTyInf :: MonadError String m => Inferred -> m (MonoTy, TypedExpr)
+ensureMonoTyInf (ty, expr) = do
+  ty <- ensureMonoTy ty
+  pure (ty, expr)
+
+inferExpr :: TypingCtx m => Expr -> m Inferred
+inferExpr (GExpr { expr }) = case expr of
+  Const i -> inferConst i
   Var name -> inferVar name
   TLam tlam -> inferTLam tlam
   TApp tapp -> inferTApp tapp
@@ -39,26 +49,33 @@ inferExpr = \case
   Handle handle -> inferHandle handle
   unsupported -> error $ "Unsupported construct: " <> show unsupported
 
-inferConst :: TySchema
-inferConst = emptyTySchema $ TyCtor MkTyCtor
-  { name = "Int", lt = ltFree, args = [] }
+inferConst :: (TypingCtx m) => Int -> m Inferred
+inferConst i =
+  withType (emptyTySchema int) $ monoTyped int $ Const i
+  where int = TyCtor MkTyCtor { name = "Int", lt = ltFree, args = [] }
 
-inferVar :: TypingCtx m => VarName -> m TySchema
-inferVar name = ?tyCtx `lookup` name
+inferVar :: TypingCtx m => VarName -> m Inferred
+inferVar name = do
+  ty <- ?tyCtx `lookup` name
+  withType ty $ typed ty $ Var name
 
-inferTLam :: TypingCtx m => TLam -> m TySchema
+inferTLam :: TypingCtx m => TLam -> m Inferred
 inferTLam MkTLam { ltParams, tyParams, body } = do
   let ?tyCtx = fmap TyCtxTy tyParams ++ ?tyCtx
-  ty <- inferExpr body >>= ensureMonoTy
-  pure MkTySchema { ltParams, tyParams, ty }
+  (ty, typedBody) <- inferExpr body >>= ensureMonoTyInf
+  let schema = (MkTySchema { ltParams, tyParams, ty })
+  let expr = typed schema $ TLam $ MkTLam { ltParams, tyParams, body = typedBody }
+  withType schema expr
 
-inferTApp :: TypingCtx m => TApp -> m TySchema
+inferTApp :: TypingCtx m => TApp -> m Inferred
 inferTApp MkTApp { lhs, ltArgs, tyArgs } = do
-  MkTySchema { ltParams, tyParams, ty } <- inferExpr lhs
+  (MkTySchema { ltParams, tyParams, ty = lhsTy }, lhsExpr) <- inferExpr lhs
+  let expr = monoTyped lhsTy $ TApp $ MkTApp { lhs = lhsExpr, ltArgs, tyArgs }
   ltSubst <- mkSubst ltParams ltArgs
   tySubst <- mkSubst (each % #name `toListOf` tyParams) tyArgs
   checkBounds ltSubst tyParams
-  pure $ emptyTySchema $ tySubst @ (ltSubst @ ty)
+  let ty = emptyTySchema $ tySubst @ (ltSubst @ lhsTy)
+  withType ty expr
   where
     checkBounds ltSubst tyParams =
       forM_ (zip tyParams tyArgs) \(MkTyParam { name, bound }, arg) -> do
@@ -67,23 +84,25 @@ inferTApp MkTApp { lhs, ltArgs, tyArgs } = do
           throwError $ "Type argument " <> show arg <> " is not a subtype of bound "
             <> show bound' <> " of '" <> name <> "'"
 
-inferLam :: TypingCtx m => Lam -> m TySchema
+inferLam :: TypingCtx m => Lam -> m Inferred
 inferLam MkLam { ctxParams, params, body } = do
   checkDistinct ctxParams
   let ctxDiff = map (paramsToTyCtxEntry True) ctxParams <> map (paramsToTyCtxEntry False) params
-  res <- let ?tyCtx = ctxDiff ++ ?tyCtx in inferExpr body >>= ensureMonoTy
+  (res, bodyExpr) <- let ?tyCtx = ctxDiff ++ ?tyCtx in inferExpr body >>= ensureMonoTyInf
   checkEscape res
   lt <- computeFreeLt res
-  pure $ emptyTySchema $ TyFun MkTyFun
-    { ctx = each % #ty `toListOf` ctxParams
-    , args = each % #ty `toListOf` params
-    , lt, res
-    }
+  let monoTy = TyFun MkTyFun
+        { ctx = each % #ty `toListOf` ctxParams
+        , args = each % #ty `toListOf` params
+        , lt
+        , res
+        }
+  let ty = emptyTySchema monoTy
+  let expr = typed ty $ Lam $ MkLam { ctxParams, params, body = bodyExpr }
+  withType ty expr
   where
     computeFreeLt res =
       let allParams = ctxParams <> params in
-      let paramFreeTyVars = allParams & folded % #ty `foldMapOf` (`freeTyVarsAt` NegativePos) in
-      let resFreeTyVars = res `freeTyVarsAt` PositivePos in
       -- Do not consider lifetimes that are already mentioned in positive positions of a function type.
       -- let ?tyCtx = filterVars (paramFreeTyVars <> resFreeTyVars) ?tyCtx in
       let boundVars = folded % #name `toSetOf` allParams in
@@ -102,21 +121,21 @@ inferLam MkLam { ctxParams, params, body } = do
               <> " are likely to clash in implicit resolution"
         checkDistinct rest
 
-inferApp :: TypingCtx m => App -> m TySchema
--- TODO: If lt/ty args are given check them against inferred
-inferApp MkApp { callee = TApp MkTApp { lhs }, ctxArgs, args } = do
-  MkTySchema { ltParams, tyParams, ty } <- inferExpr lhs
+inferApp :: TypingCtx m => App -> m Inferred
+-- TODO: If lt/ty args are given check them against inferred!! #AA
+inferApp MkApp { callee = GExpr { expr = TApp MkTApp { lhs, ltArgs = [], tyArgs = []} }, ctxArgs, args } = do
+  (lhsSchema@MkTySchema { ltParams, tyParams, ty }, lhsExpr) <- inferExpr lhs
   MkTyFun { ctx = expectedCtxArgs, args = params, res } <-
     case ty of
       TyFun fun -> pure fun
       other -> throwError $ "Expected function, got " <> show other
   -- TODO: Ctx args #AA
-  inferredArgs <- mapM (inferExpr >=> ensureMonoTy) args
-  constraints <- zipWithM (collectConstraints PositivePos) params inferredArgs <&> mconcat
+  (inferredArgTypes, inferredArgs) <- mapAndUnzipM (inferExpr >=> ensureMonoTyInf) args
+  constraints <- zipWithM (collectConstraints PositivePos) params inferredArgTypes <&> mconcat
   let CombinedConstraints { tyConstraints, ltConstraints } = constraints
 
   -- TODO: Check bounds of parameters, add them to constraints maybe
-  tyArgs <- mapM (solveFor tyConstraints) (each % #name `toListOf` tyParams) 
+  tyArgs <- mapM (solveFor tyConstraints) (each % #name `toListOf` tyParams)
   ltArgs <- mapM (solveFor ltConstraints) ltParams
 
   ltSubst <- mkSubst ltParams ltArgs
@@ -124,35 +143,45 @@ inferApp MkApp { callee = TApp MkTApp { lhs }, ctxArgs, args } = do
   let deducedRes = ltSubst @ (tySubst @ res)
 
   -- TODO: Dicuss calling infer tapp for bounds check
-  foundCtxArgs <- if not $ null ctxArgs then pure ctxArgs else
-    fmap Var <$> ?tyCtx `lookupImplicits` expectedCtxArgs
-  actualCtxArgs <- mapM (ensureMonoTy <=< inferExpr) foundCtxArgs
-  actualCtxArgs `checkArgsVs` expectedCtxArgs
-  pure $ emptyTySchema deducedRes
+  foundCtxArgs <-
+    if not $ null ctxArgs then pure ctxArgs
+    else
+      let names = ?tyCtx `lookupImplicits` expectedCtxArgs in
+      fmap (untyped . Var ) <$> names
+
+  let typedCallee = typed lhsSchema $ TApp MkTApp { lhs = lhsExpr, ltArgs, tyArgs }
+  -- TODO: Context arguments! #AA
+  let typedExpr = monoTyped deducedRes $ App MkApp { callee = typedCallee, ctxArgs = [], args = inferredArgs }
+
+  actualCtxArgs <- mapM (ensureMonoTyInf <=< inferExpr) foundCtxArgs
+  (fst <$> actualCtxArgs) `checkArgsVs` expectedCtxArgs
+  withType (emptyTySchema deducedRes) typedExpr
 
 inferApp MkApp { callee, ctxArgs, args } = do
-  MkTyFun { ctx = expectedCtxArgs, args = expectedArgs, res } <-
-    inferExpr callee >>= ensureMonoTy >>= \case
-      TyFun fun -> pure fun
+  (MkTyFun { ctx = expectedCtxArgs, args = expectedArgs, res }, calleeExpr) <-
+    inferExpr callee >>= ensureMonoTyInf >>= \case
+      (TyFun fun, expr) -> pure (fun, expr)
       other -> throwError $ "Expected function, got " <> show other
   foundCtxArgs <- if not $ null ctxArgs then pure ctxArgs else
-    fmap Var <$> ?tyCtx `lookupImplicits` expectedCtxArgs
-  actualCtxArgs <- mapM (ensureMonoTy <=< inferExpr) foundCtxArgs
-  actualArgs <- mapM (ensureMonoTy <=< inferExpr) args
+    fmap (untyped . Var ) <$> ?tyCtx `lookupImplicits` expectedCtxArgs
+  (actualCtxArgs, actualCtxArgExprs) <- mapAndUnzipM (ensureMonoTyInf <=< inferExpr) foundCtxArgs
+  (actualArgs, actualArgExprs) <- mapAndUnzipM (ensureMonoTyInf <=< inferExpr) args
   actualCtxArgs `checkArgsVs` expectedCtxArgs
   actualArgs `checkArgsVs` expectedArgs
-  pure $ emptyTySchema res
+  let ty = emptyTySchema res
+  let expr = typed ty $ App MkApp { callee = calleeExpr, ctxArgs = actualCtxArgExprs, args = actualArgExprs}
+  withType ty expr
 
-inferMatch :: TypingCtx m => Match -> m TySchema
+inferMatch :: TypingCtx m => Match -> m Inferred
 inferMatch MkMatch { scrutinee, branches } = do
-  MkTyCtor { name = tyCtor, lt, args = tyArgs } <-
-    inferExpr scrutinee >>= ensureMonoTy >>= \case
-      TyCtor ctor -> pure ctor
+  (MkTyCtor { name = tyCtor, lt, args = tyArgs }, scrutineeExpr) <-
+    inferExpr scrutinee >>= ensureMonoTyInf >>= \case
+      (TyCtor ctor, expr) -> pure (ctor, expr)
       other -> throwError $ "Expected type ctor, got " <> show other
   let ctorCandidates = ?tyCtx `lookup` tyCtor
   unless (length branches == length ctorCandidates) $
     throwError $ "Some branches are not covered of " <> show ctorCandidates
-  resTys <- forM branches \MkBranch{ ctorName, varPatterns, body } -> do
+  (resTys, resExprs) <- unzip <$> forM branches \MkBranch{ ctorName, varPatterns, body } -> do
     MkTyCtxCtor { ltParams, tyParams, params } <- ctorCandidates
       & List.find @[] (\MkTyCtxCtor { name } -> name == ctorName)
       & maybe (throwError $ "Ctor " <> ctorName <> " do not have expected type") pure
@@ -164,75 +193,87 @@ inferMatch MkMatch { scrutinee, branches } = do
       throwError $ "Number of var patterns mismatch for " <> ctorName
     let paramCtx = zipWith mkCtxVar varPatterns params'
     let ?tyCtx = paramCtx ++ map (mkCtxLt lt) existentials ++ ?tyCtx
-    inferExpr body >>= ensureMonoTy <&> eliminateExistentials existentials lt
+    (ty, bodyExpr) <- inferExpr body >>= ensureMonoTyInf
+    let expr = MkBranch{ ctorName, varPatterns, body = bodyExpr }
+    pure (eliminateExistentials existentials lt ty, expr)
+    
   when (null resTys) $
     throwError "There should be at least one branch"
-  pure $ emptyTySchema $ foldr1 lub resTys
+  let ty = foldr1 lub resTys
+  let expr = monoTyped ty $ Match MkMatch { scrutinee = scrutineeExpr, branches = resExprs }
+  withType (emptyTySchema ty) expr
   where
     eliminateExistentials existentials lt =
       eliminateLts (Set.fromList existentials) lt (Just PositivePos)
 
     mkCtxLt lt name = TyCtxLt MkTyCtxLt { name, bound = lt }
 
-inferPerform :: TypingCtx m => Perform -> m TySchema
+inferPerform :: TypingCtx m => Perform -> m Inferred
 inferPerform MkPerform { opName, cap, tyArgs = opTyArgs, args } = do
-  MkTyCtor { name = effName, args = tyArgs } <-
-    inferExpr cap >>= ensureMonoTy >>= \case
-      TyCtor ctor -> pure ctor
+  (MkTyCtor { name = effName, args = tyArgs }, capExpr) <-
+    inferExpr cap >>= ensureMonoTyInf >>= \case
+      (TyCtor ctor, expr) -> pure (ctor, expr)
       other -> throwError $ "Expected effect type, got " <> show other
   MkEffCtxEntry { tyParams, ops } <- ?effCtx `lookup` effName
   MkOpSig { tyParams = opTyParams, args = expectedArgs, res } <- case ops !? opName of
     Nothing -> throwError $ "Effect " <> effName <> " do not include operation " <> opName
     Just op -> pure op
   subst <- mkSubst2 tyParams tyArgs opTyParams opTyArgs
-  actualArgs <- mapM (ensureMonoTy <=< inferExpr) args
+  (actualArgs, actualArgsExprs) <- mapAndUnzipM (ensureMonoTyInf <=< inferExpr) args
   actualArgs `checkArgsVs` (subst @ expectedArgs)
-  pure $ emptyTySchema $ subst @ res
+  let ty = emptyTySchema $ subst @ res
+  let expr = typed ty $ Perform MkPerform { opName, cap = capExpr, tyArgs = opTyArgs, args = actualArgsExprs }
+  withType ty expr
 
-inferHandle :: TypingCtx m => Handle -> m TySchema
+inferHandle :: TypingCtx m => Handle -> m Inferred
 inferHandle MkHandle { capName, effTy, handler, body } = do
-  let MkTyCtor { name = effName, args = effTyArgs } = effTy
-  unless (#lt % only LtLocal `has` effTy) $
-    throwError "Capabilities can only have local lifetime"
+  undefined
+  -- let MkTyCtor { name = effName, args = effTyArgs } = effTy
+  -- unless (#lt % only LtLocal `has` effTy) $
+  --   throwError "Capabilities can only have local lifetime"
 
-  let capCtx = TyCtxCap MkTyCtxCap { name = capName, monoTy = TyCtor effTy }
-  resTy <- let ?tyCtx = capCtx : ?tyCtx in inferExpr body >>= ensureMonoTy
-  checkEscape resTy
+  -- let capCtx = TyCtxCap MkTyCtxCap { name = capName, monoTy = TyCtor effTy }
+  -- (resTy, resExpr) <- let ?tyCtx = capCtx : ?tyCtx in inferExpr body >>= ensureMonoTyInf
+  -- checkEscape resTy
 
-  MkEffCtxEntry { tyParams = effTyParams, ops } <- ?effCtx `lookup` effName
-  effSubst <- mkSubst effTyParams effTyArgs
-  unless (length handler == Map.size ops) $
-    throwError "Wrong number of implemented operations"
-  forM_ handler \MkHandlerEntry { opName, tyParams = opDefTyParams, paramNames, body } -> do
-    MkOpSig { tyParams = opSigTyParams, args, res = opResTy } <-
-      case ops !? opName of
-        Nothing -> throwError $ "Operation " <> opName <> " is not specified for effect " <> effName
-        Just sig -> pure $ effSubst @ sig
-    let opTyParams = if not $ null opDefTyParams then opDefTyParams else
-          replicate (length opSigTyParams) "_"
-    opSubst <- mkSubst opSigTyParams (TyVar <$> opTyParams)
-    let args' = opSubst @ args
-    unless (length paramNames == length args') $
-      throwError "Operation parameter number mismatch"
-    unless (ltFree == lubAll (ltsOf args')) $
-      throwError $ "Capabilities can leak through '" <> opName <> "' operation parameters"
-    let tyBoundsCtx = opTyParams <&> (`mkCtxBound` tyAnyOf ltFree)
-    let opParamCtx = zipWith mkCtxVar paramNames args'
-    let resumeCtx = mkResume (opSubst @ opResTy) resTy
-    opRetTy <- let ?tyCtx = resumeCtx : tyBoundsCtx ++ opParamCtx ++ ?tyCtx in
-      inferExpr (effSubst @ body) >>= ensureMonoTy
-    unless (Set.fromList opTyParams `Set.disjoint` freeTyVars opRetTy) $
-      throwError $ "Operation " <> opName <> " type parameters should not leak with return"
-    unless (opRetTy `subTyOf` resTy) $
-      throwError $ "Operation " <> opName <> " return type " <> show opRetTy
-        <> " is not a sustype of " <> show resTy
-  pure $ emptyTySchema resTy
-  where
-    mkResume opResTy resTy = TyCtxVar MkTyCtxVar
-      { name = "resume", tySchema = emptyTySchema $ TyFun MkTyFun
-          { ctx = [], lt = ltFree, args = [opResTy], res = resTy }
-      }
-    mkCtxBound name bound = TyCtxTy MkTyParam { name, bound }
+  -- MkEffCtxEntry { tyParams = effTyParams, ops } <- ?effCtx `lookup` effName
+  -- effSubst <- mkSubst effTyParams effTyArgs
+  -- unless (length handler == Map.size ops) $
+  --   throwError "Wrong number of implemented operations"
+  -- forM_ handler \MkHandlerEntry { opName, tyParams = opDefTyParams, paramNames, body } -> do
+  --   MkOpSig { tyParams = opSigTyParams, args, res = opResTy } <-
+  --     case ops !? opName of
+  --       Nothing -> throwError $ "Operation " <> opName <> " is not specified for effect " <> effName
+  --       Just sig -> pure $ effSubst @ sig
+  --   let opTyParams = if not $ null opDefTyParams then opDefTyParams else
+  --         replicate (length opSigTyParams) "_"
+  --   opSubst <- mkSubst opSigTyParams (TyVar <$> opTyParams)
+  --   let args' = opSubst @ args
+  --   unless (length paramNames == length args') $
+  --     throwError "Operation parameter number mismatch"
+  --   unless (ltFree == lubAll (ltsOf args')) $
+  --     throwError $ "Capabilities can leak through '" <> opName <> "' operation parameters"
+  --   let tyBoundsCtx = opTyParams <&> (`mkCtxBound` tyAnyOf ltFree)
+  --   let opParamCtx = zipWith mkCtxVar paramNames args'
+  --   let resumeCtx = mkResume (opSubst @ opResTy) resTy
+  --   let body = undefined
+  --   (opRetTy, opRetExpr) <- let ?tyCtx = resumeCtx : tyBoundsCtx ++ opParamCtx ++ ?tyCtx in
+  --     inferExpr (effSubst @ body) >>= ensureMonoTyInf
+  --   unless (Set.fromList opTyParams `Set.disjoint` freeTyVars opRetTy) $
+  --     throwError $ "Operation " <> opName <> " type parameters should not leak with return"
+  --   unless (opRetTy `subTyOf` resTy) $
+  --     throwError $ "Operation " <> opName <> " return type " <> show opRetTy
+  --       <> " is not a sustype of " <> show resTy
+  -- -- SUPER TODO: #AA
+  -- let expr = undefined 
+  -- -- Handle MkHandle { capName, effTy, handler, body }
+  -- withType (emptyTySchema resTy) expr
+  -- where
+  --   mkResume opResTy resTy = TyCtxVar MkTyCtxVar
+  --     { name = "resume", tySchema = emptyTySchema $ TyFun MkTyFun
+  --         { ctx = [], lt = ltFree, args = [opResTy], res = resTy }
+  --     }
+  --   mkCtxBound name bound = TyCtxTy MkTyParam { name, bound }
 
 checkArgsVs :: TypingCtx m => [MonoTy] -> [MonoTy] -> m ()
 checkArgsVs actualArgs expectedArgs = do
