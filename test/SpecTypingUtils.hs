@@ -12,10 +12,10 @@ import Arbitrary.MonoTypes
 
 
 tests :: IO NamedTests
-tests = pure []
-  -- [ ("GLB Laws", testGlbLaws)
-  -- , ("LUB Laws", testLubLaws)
-  -- ]
+tests = sequenceA
+  [ ("GLB Laws",) <$> testGlbLaws
+  , ("LUB Laws",) <$> testLubLaws
+  ]
 
 testGlbLaws :: IO Test
 testGlbLaws = pure $ TestList

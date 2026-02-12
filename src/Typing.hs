@@ -17,7 +17,6 @@ import Data.Set (Set, (\\))
 import Data.Set qualified as Set
 import Data.Map ((!?))
 import Data.Map qualified as Map
-import Debug.Trace
 import GHC.Stack
 import Optics
 import Prelude hiding (lookup)
@@ -26,7 +25,6 @@ import TypingConstraints
 import Data.Coerce
 import Foreign.C (throwErrno)
 import PpSyntax (ppTypedExpr, ppExpr)
-import Data.Foldable (Foldable(length))
 
 type Inferred = (TySchema, TypedExpr)
 
@@ -38,10 +36,8 @@ ensureMonoTyInf (ty, expr) = do
   ty <- ensureMonoTy ty
   pure (ty, expr)
 
-
-
-inferExprInner :: TypingCtx m => Expr -> m Inferred
-inferExprInner (GExpr { expr, ty=() }) = case expr of
+inferExpr :: TypingCtx m => Expr -> m Inferred
+inferExpr (GExpr { expr, ty=() }) = case expr of
   Const i -> inferConst i
   Var name -> inferVar name
   TLam tlam -> inferTLam tlam
@@ -52,15 +48,6 @@ inferExprInner (GExpr { expr, ty=() }) = case expr of
   Perform perform -> inferPerform perform
   Handle handle -> inferHandle handle
   unsupported -> error $ "Unsupported construct: " <> show unsupported
-
-inferExpr :: TypingCtx m => Expr -> m Inferred
-inferExpr expr = do
-  let spaces = replicate (length $ getCallStack callStack) ' '
-  let print a b = Debug.Trace.traceM $ spaces <> a <> b
-  print "-> " $ ppExpr expr
-  result <- inferExprInner expr
-  print "<- " $ ppTypedExpr $ snd result
-  pure result
 
 inferConst :: (TypingCtx m) => Int -> m Inferred
 inferConst i =
@@ -209,7 +196,6 @@ inferMatch MkMatch { scrutinee, branches } = do
     (ty, bodyExpr) <- inferExpr body >>= ensureMonoTyInf
     let expr = MkBranch{ ctorName, varPatterns, body = bodyExpr }
     pure (eliminateExistentials existentials lt ty, expr)
-    
   when (null resTys) $
     throwError "There should be at least one branch"
   let ty = foldr1 lub resTys

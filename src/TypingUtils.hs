@@ -277,7 +277,7 @@ freeVarsOf (GExpr { expr = arg }) = case arg of
       freeVarsOf body \\ Set.fromList ("resume" : paramNames)
   other -> error $ "unsupported free vars " <> show other
 
-data PositionSign = PositivePos | NegativePos | InvariantPos deriving Eq
+data PositionSign = PositivePos | NegativePos | InvariantPos deriving (Eq, Show)
 
 changeSign :: PositionSign -> PositionSign
 changeSign = \case

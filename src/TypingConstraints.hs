@@ -9,33 +9,39 @@ import qualified Data.List as List
 import Control.Monad
 import Control.Monad.Error.Class
 import Data.Maybe
+import Data.Kind
 import qualified Data.Set as Set
 import TypingCtx
 import Data.Coerce
-import qualified Debug.Trace
+import GHC.Stack (HasCallStack)
 
 newtype TyConstraints n t = TyConstraints (Map n (TyConstraint t))
-data TyConstraint t = TyConstraint { subOf :: [t], supOf :: [t] }
+data TyConstraint t = TyConstraint { subOf :: [t], supOf :: [t], position :: PositionSign }
 
 instance (Show t) => Show (TyConstraint t) where
-  show TyConstraint { subOf, supOf } =
-    show subOf <> " <: it <: " <> show supOf
+  show TyConstraint { subOf, supOf, position } =
+    "[" <> show subOf <> " <: it <: " <> show supOf <> "]" <> show position
 
 instance (Show n, Show t) => Show (TyConstraints n t) where
   show (TyConstraints c) =
-    List.intercalate "; " $ List.map (\(k, v) -> show k <> show v) $ Map.toList c
+    "[" <> List.intercalate "; " (List.map (\(k, v) -> show k <> show v) $ Map.toList c) <> "]"
 
 type Parameter = MonoTy
 type Argument = MonoTy
 
-data CombinedConstraints = CombinedConstraints 
+data CombinedConstraints = CombinedConstraints
   { tyConstraints :: TyConstraints TyName MonoTy
-  , ltConstraints :: TyConstraints LtName Lt 
+  , ltConstraints :: TyConstraints LtName Lt
   }
 
 instance (Ord n) => Semigroup (TyConstraints n t) where
   (TyConstraints l) <> (TyConstraints r) = TyConstraints $ Map.unionWith merge l r
-    where  merge (TyConstraint l1 r1) (TyConstraint l2 r2) = TyConstraint (l1 <> l2) (r1 <> r2)
+    where
+      merge (TyConstraint l1 r1 p1) (TyConstraint l2 r2 p2) = TyConstraint (l1 <> l2) (r1 <> r2) (p1 `intersect` p2)
+      intersect = curry $ \case
+        (PositivePos, PositivePos) -> PositivePos
+        (NegativePos, NegativePos) -> NegativePos
+        _ -> InvariantPos
 
 instance (Ord n) => Monoid (TyConstraints n t) where
   mempty = TyConstraints Map.empty
@@ -72,7 +78,7 @@ collectConstraints position par arg = do
           throwError $ "Constructors don't match: " <> ctor1 <> " and " <> ctor2
         unless (length args1 == length args2) $
           throwError $ "Argument count mismatch: " <> show (length args1) <> " and " <> show (length args2)
-        argConstraints <- zipWithM (collectConstraints InvariantPos) (coerce args1) (coerce args2)
+        argConstraints <- zipWithM (collectConstraints InvariantPos) args1 args2
         selfConstraints <- addLtConstraint lt1 lt2
         pure $ mconcat argConstraints <> selfConstraints
       ( TyFun MkTyFun { ctx = ctx1, lt = lt1, args = args1, res = res1 },
@@ -100,20 +106,41 @@ collectConstraints position par arg = do
       pure $ mempty { tyConstraints = new }
     addConstraint :: (TypeType t, Ord n, TypingCtx m) => n -> t -> m (TyConstraints n t)
     addConstraint name bound = pure $ TyConstraints $ Map.singleton name $ case position of
-      PositivePos -> TyConstraint [bound] []
-      NegativePos -> TyConstraint [] [bound]
-      InvariantPos -> TyConstraint [bound] [bound] 
+      PositivePos -> TyConstraint [bound] [] position
+      NegativePos -> TyConstraint [] [bound] position
+      InvariantPos -> TyConstraint [bound] [bound] position
 
-solveConstraint :: (TypeType ty, TypingCtx m) => TyConstraint ty -> m ty
-solveConstraint c@(TyConstraint subs sups) = do
-  let super = lubAll sups
-  let sub = glbAll subs
+-- TODO: Discuss
+class Solvable ty where
+  type SolvableC ty :: Constraint
+  solveLubAll :: (LubC ty, Foldable f, HasCallStack) => f ty -> ty
+  solveGlbAll :: (LubC ty, Foldable f, HasCallStack) => f ty -> ty
+
+instance Solvable MonoTy where
+  type SolvableC MonoTy = (?tyCtx :: TyCtx)
+  solveLubAll = lubAll
+  solveGlbAll = glbAll
+
+instance Solvable Lt where
+  type SolvableC Lt = ()
+  solveLubAll = lubAll
+  solveGlbAll = glbAll
+
+
+solveConstraint :: (TypeType ty, Solvable ty, TypingCtx m) => TyConstraint ty -> m ty
+solveConstraint c@(TyConstraint subs sups position) = do
+  let super = solveLubAll sups
+  let sub = solveGlbAll subs
   unless (sub `subTyOf` super) $ throwError $ "Cant solve constraint" <> show c
-  pure $ case (subs, sups) of
-    ([], _ : _) -> super
-    _ -> sub
+  case position of
+    PositivePos -> pure sub -- Covariant position
+    NegativePos -> pure super -- Contravariant position
+    InvariantPos -> do -- InvariantPosition
+      let typesAreEqual = super `subTyOf` sub && sub `subTyOf` super
+      unless typesAreEqual $ throwError $ "Unsolvable constraint, for invariant pos types are supposed to be equal, but got: super: " <> show super <> " sub:" <> show sub
+      pure sub
 
-solveFor :: (TypeType ty, TypingCtx m, Ord n) => TyConstraints n ty -> n -> m ty
+solveFor :: (TypeType ty, Solvable ty, TypingCtx m, Ord n) => TyConstraints n ty -> n -> m ty
 solveFor (TyConstraints constraints) name = do
   let solved = solveConstraint <$> constraints !? name
   fromMaybe (pure top) solved
