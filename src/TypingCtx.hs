@@ -14,6 +14,7 @@ import Control.Monad.Except
 import GHC.Stack
 import Text.PrettyPrint.GenericPretty
 import Optics
+import Control.Monad.State
 
 type TyCtx = [TyCtxEntry]
 
@@ -125,3 +126,17 @@ instance MonadError String m => Lookup EffCtx TyName (m EffCtxEntry) where
 
 filterVars :: Set TyName -> TyCtx -> TyCtx
 filterVars names = filter (_TyCtxTy % #name % filtered (`Set.member` names) `hasn't`)
+
+class MonadFresh res m where
+  fresh :: m res
+
+instance Monad m => MonadFresh LtName (StateT Int m) where
+  fresh = do
+    curr <- get
+    modify' (+1)
+    pure $ "$l" <> show curr
+
+type TypingCtx m =
+  ( HasCallStack, ?effCtx :: EffCtx, ?tyCtx :: TyCtx
+  , MonadError String m, MonadFresh LtName m
+  )

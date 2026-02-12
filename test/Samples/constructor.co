@@ -1,0 +1,8 @@
+data Box<a> = Box(a)
+data Unit = Unit
+
+fun constructAndReturn(): Box<Unit'free>'free = Box(Unit())
+  
+let rexplicit = constructAndReturn(localUnit())
+let rltinfer = constructAndReturn(localUnit())
+let rtyinfer = constructAndReturn(localUnit())

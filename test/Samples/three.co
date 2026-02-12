@@ -1,0 +1,5 @@
+fun three<a <: Any'la>(x: a): Int'free = 3
+
+let rexplicit = three[]<>(42)
+let rltinfer = three<>(31)
+let rtyinfer = three(16)

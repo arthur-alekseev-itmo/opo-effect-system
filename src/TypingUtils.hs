@@ -52,9 +52,10 @@ mkSubst2 names1 target1 names2 target2 = do
   pure $ Subst $ Map.fromList $ zip names1 target1 ++ zip names2 target2
 
 instance DoSubst target => Apply (Subst target) Lt Lt where
+  (@) :: DoSubst target => Subst target -> Lt -> Lt
   f @ arg = case arg of
     LtLocal -> LtLocal
-    LtMin names -> foldr lub ltFree $ (\name -> onLt f name (ltVar name)) <$> Set.toList names
+    LtMin names -> foldr (lub . (\name -> onLt f name (ltVar name))) ltFree (Set.toList names)
 
 instance DoSubst target => Apply (Subst target) MonoTy MonoTy where
   f @ arg = case arg of
@@ -65,8 +66,8 @@ instance DoSubst target => Apply (Subst target) MonoTy MonoTy where
 instance DoSubst target => Apply (Subst target) TyCtor TyCtor where
   f @ MkTyCtor { name, lt, args } = MkTyCtor { name, lt = f @ lt, args = f @ args }
 
-instance DoSubst target => Apply (Subst target) Expr Expr where
-  f @ arg = case arg of
+instance {-# OVERLAPPING #-} DoSubst target => Apply (Subst target) Expr Expr where
+  f @ (GExpr { expr = arg, ty }) = typedGen ty $ case arg of
     Const _ -> arg
     Plus lhs rhs -> Plus (f @ lhs) (f @ rhs)
     Var _ -> arg
@@ -79,17 +80,19 @@ instance DoSubst target => Apply (Subst target) Expr Expr where
     Perform MkPerform { opName, cap, tyArgs, args } -> Perform MkPerform { opName, cap = f @ cap, tyArgs = f @ tyArgs, args = f @ args }
     Handle MkHandle { capName, effTy, handler, body } -> Handle MkHandle { capName, effTy = f @ effTy, handler = f @ handler, body = f @ body }
     RtHandler MkRtHandler { marker, body } -> RtHandler MkRtHandler { marker, body = f @ body }
+    
 
-instance DoSubst target => Apply (Subst target) HandlerEntry HandlerEntry where
+
+instance {-# OVERLAPPING #-} DoSubst target => Apply (Subst target) HandlerEntry HandlerEntry where
   f @ MkHandlerEntry { opName, tyParams, paramNames, body } = MkHandlerEntry { opName, tyParams, paramNames, body = f @ body } -- todo
 
-instance DoSubst target => Apply (Subst target) Param Param where
+instance {-# OVERLAPPING #-} DoSubst target => Apply (Subst target) Param Param where
   f @ MkParam { name, ty } = MkParam { name, ty = f @ ty }
 
-instance DoSubst target => Apply (Subst target) Branch Branch where
+instance {-# OVERLAPPING #-} DoSubst target => Apply (Subst target) Branch Branch where
   f @ MkBranch { ctorName, varPatterns, body } = MkBranch { ctorName, varPatterns, body = f @ body }
 
-instance DoSubst target => Apply (Subst target) OpSig OpSig where
+instance {-# OVERLAPPING #-} DoSubst target => Apply (Subst target) OpSig OpSig where
   f @ MkOpSig { tyParams, args, res } = MkOpSig { tyParams, args, res = f @ res } -- TODO
 
 
@@ -97,12 +100,14 @@ infix 5 `lub`
 class LeastUpperBound ty where
   type LubC ty :: Constraint
   lub :: (LubC ty, HasCallStack) => ty -> ty -> ty
+  lubAll :: (LubC ty, Foldable f, HasCallStack) => f ty -> ty
 
 instance LeastUpperBound Lt where
   type LubC Lt = ()
   lub LtLocal _ = LtLocal
   lub _ LtLocal = LtLocal
   lub (LtMin names1) (LtMin names2) = LtMin (names1 <> names2)
+  lubAll = foldr lub ltFree
 
 instance LeastUpperBound MonoTy where
   type LubC MonoTy = (?tyCtx :: TyCtx)
@@ -117,53 +122,82 @@ instance LeastUpperBound MonoTy where
   lub
     (TyFun MkTyFun { ctx = ctx1, lt = lt1, args = args1, res = res1 })
     (TyFun MkTyFun { ctx = ctx2, lt = lt2, args = args2, res = res2 })
-    | ctx1 == ctx2 && args1 == args2 = -- TODO greatest lower bound
-      TyFun MkTyFun { ctx = ctx1, lt = lt1 `lub` lt2, args = args1, res = res1 `lub` res2 }
+    | ctx1 == ctx2 && length args1 == length args2 =
+      TyFun MkTyFun { ctx = ctx1, lt = lt1 `lub` lt2, args = zipWith glb args1 args2, res = res1 `lub` res2 }
   lub ty1 ty2 =
     let lt = lubAll (ltsOf ty1) `lub` lubAll (ltsOf ty2) in
     TyCtor MkTyCtor { name = "Any", lt, args = [] }
+  -- TODO: Proper subtyping??? For glb too
+  lubAll f =
+    if null f then TyCtor MkTyCtor { name = "Any", lt = ltLocal, args = [] }
+    else foldr1 lub f
 
-lubAll :: Foldable f => f Lt -> Lt
-lubAll = foldr lub ltFree
+infix 5 `glb`
+class GreatestLowerBound ty where
+  type GlbC ty :: Constraint
+  glb :: (GlbC ty, HasCallStack) => ty -> ty -> ty
+  glbAll :: (LubC ty, Foldable f, HasCallStack) => f ty -> ty
 
+instance GreatestLowerBound Lt where
+  type GlbC Lt = ()
+  glb LtLocal l = l
+  glb l LtLocal = l
+  glb (LtMin l) (LtMin r) = LtMin $ Set.intersection l r
+  glbAll = foldr glb ltFree
 
-class MonadFresh res m where
-  fresh :: m res
+instance GreatestLowerBound MonoTy where
+  type GlbC MonoTy = (?tyCtx :: TyCtx)
+  glb var@(TyVar name1) (TyVar name2)
+    | name1 == name2 = var
+    | otherwise = ?tyCtx `lookupBound` name1 `glb` ?tyCtx `lookupBound` name2
+  glb
+    (TyCtor MkTyCtor { name = name1, lt = lt1, args = args1 })
+    (TyCtor MkTyCtor { name = name2, lt = lt2, args = args2 })
+    | name1 == name2 && args1 == args2 =
+      TyCtor MkTyCtor { name = name1, lt = lt1 `glb` lt2, args = args1 }
+  glb
+    (TyFun MkTyFun { ctx = ctx1, lt = lt1, args = args1, res = res1 })
+    (TyFun MkTyFun { ctx = ctx2, lt = lt2, args = args2, res = res2 })
+    | ctx1 == ctx2 && length args1 == length args2 =
+      TyFun MkTyFun { ctx = ctx1, lt = lt1 `glb` lt2, args = zipWith lub args1 args2, res = res1 `glb` res2 }
+  glb ty1 ty2 =
+    let lt = glbAll (ltsOf ty1) `glb` glbAll (ltsOf ty2) in
+    TyCtor MkTyCtor { name = "Bot", lt, args = [] }
+  glbAll f =
+    if null f then TyCtor MkTyCtor { name = "Bot", lt = ltFree, args = [] }
+    else foldr1 glb f
 
 runFreshT :: Functor m => StateT Int m a -> m a
 runFreshT = fmap fst . flip runStateT 0
 
-instance Monad m => MonadFresh LtName (StateT Int m) where
-  fresh = do
-    curr <- get
-    modify' (+1)
-    pure $ "$l" <> show curr
-
-
 infix 6 `subTyOf`
-subTyOf :: (?tyCtx :: TyCtx) => MonoTy -> MonoTy -> Bool
-subTyOf = curry \case
-  (ty, TyCtor MkTyCtor { name = "Any", lt = lt2 }) ->
-    lubAll (ltsOf ty) `subLtOf` lt2
+class SubTypeOf ty where
+  subTyOf :: (?tyCtx :: TyCtx) => ty -> ty -> Bool
 
-  (TyVar name1, TyVar name2) -> name1 == name2
-  (TyVar name1, ty) -> (?tyCtx `lookupBound` name1) `subTyOf` ty
+instance SubTypeOf MonoTy where
+  subTyOf :: (?tyCtx :: TyCtx) => MonoTy -> MonoTy -> Bool
+  subTyOf = curry \case
+    (ty, TyCtor MkTyCtor { name = "Any", lt = lt2 }) ->
+      lubAll (ltsOf ty) `subTyOf` lt2
 
-  ( TyCtor MkTyCtor { name = ctor1, lt = lt1, args = args1 },
-    TyCtor MkTyCtor { name = ctor2, lt = lt2, args = args2 } ) ->
-    ctor1 == ctor2 && lt1 `subLtOf` lt2 && args1 == args2
+    (TyVar name1, TyVar name2) -> name1 == name2
+    (TyVar name1, ty) -> (?tyCtx `lookupBound` name1) `subTyOf` ty
 
-  ( TyFun MkTyFun { ctx = ctx1, lt = lt1, args = args1, res = res1 },
-    TyFun MkTyFun { ctx = ctx2, lt = lt2, args = args2, res = res2 } ) -> and
-    [ length ctx1 == length ctx2
-    , and $ zipWith subTyOf ctx2 ctx1
-    , length args1 == length args2
-    , and $ zipWith subTyOf args2 args1
-    , lt1 `subLtOf` lt2
-    , res1 `subTyOf` res2
-    ]
+    ( TyCtor MkTyCtor { name = ctor1, lt = lt1, args = args1 },
+      TyCtor MkTyCtor { name = ctor2, lt = lt2, args = args2 } ) ->
+      ctor1 == ctor2 && lt1 `subTyOf` lt2 && args1 == args2
 
-  _ -> False
+    ( TyFun MkTyFun { ctx = ctx1, lt = lt1, args = args1, res = res1 },
+      TyFun MkTyFun { ctx = ctx2, lt = lt2, args = args2, res = res2 } ) -> and
+      [ length ctx1 == length ctx2
+      , and $ zipWith subTyOf ctx2 ctx1
+      , length args1 == length args2
+      , and $ zipWith subTyOf args2 args1
+      , lt1 `subTyOf` lt2
+      , res1 `subTyOf` res2
+      ]
+
+    _ -> False
 
 subTySchemaOf :: TySchema -> TySchema -> Bool
 subTySchemaOf
@@ -172,11 +206,14 @@ subTySchemaOf
   let ?tyCtx = TyCtxTy <$> tyParams2 in
   ltParams1 == ltParams2 && tyParams1 == tyParams2 && ty1 `subTyOf` ty2
 
-subLtOf :: (?tyCtx :: TyCtx) => Lt -> Lt -> Bool
-subLtOf = curry \case
-  (LtMin lts1, lt2@(LtMin lts2)) -> flip all lts1 \name ->
-    name `Set.member` lts2 || (?tyCtx `lookupBound` name) `subLtOf` lt2
-  (lt1, lt2) -> lt1 == ltFree || lt2 == LtLocal || lt1 == lt2
+instance SubTypeOf Lt where
+  subTyOf :: (?tyCtx :: TyCtx) => Lt -> Lt -> Bool
+  subTyOf = curry \case
+    (LtMin lts1, lt2@(LtMin lts2)) -> flip all lts1 \name ->
+      name `Set.member` lts2 || (?tyCtx `lookupBound` name) `subTyOf` lt2
+    (lt1, lt2) -> lt1 == ltFree || lt2 == LtLocal || lt1 == lt2
+
+type TypeType ty = (Show ty, GlbC ty, LubC ty, GreatestLowerBound ty, LeastUpperBound ty, SubTypeOf ty, Top ty)
 
 eliminateLts :: Set LtName -> Lt -> Maybe PositionSign -> MonoTy -> MonoTy
 eliminateLts targetNames upperBound currSign = \case
@@ -201,6 +238,7 @@ eliminateLts targetNames upperBound currSign = \case
         Nothing -> error "Cannot leak existential lifetime"
         Just PositivePos -> upperBound
         Just NegativePos -> ltFree
+        Just InvariantPos -> error "TODO" -- TODO
 
     approximate = \case
       LtLocal -> LtLocal
@@ -217,7 +255,7 @@ ensureMonoTy = \case
   schema -> throwError $ "Expected mono type, got " <> show schema <> " at\n" <> prettyCallStack callStack
 
 freeVarsOf :: HasCallStack => Expr -> Set VarName
-freeVarsOf = \case
+freeVarsOf (GExpr { expr = arg }) = case arg of
   Const _ -> Set.empty
   Plus lhs rhs -> freeVarsOf lhs <> freeVarsOf rhs
   Var name -> Set.singleton name
@@ -239,10 +277,13 @@ freeVarsOf = \case
       freeVarsOf body \\ Set.fromList ("resume" : paramNames)
   other -> error $ "unsupported free vars " <> show other
 
-data PositionSign = PositivePos | NegativePos deriving Eq
+data PositionSign = PositivePos | NegativePos | InvariantPos deriving (Eq, Show)
 
 changeSign :: PositionSign -> PositionSign
-changeSign = \case PositivePos -> NegativePos; NegativePos -> PositivePos
+changeSign = \case
+  PositivePos -> NegativePos
+  NegativePos -> PositivePos
+  InvariantPos -> InvariantPos
 
 freeLtVarsOf
   :: (HasCallStack, ?tyCtx :: TyCtx)
@@ -255,7 +296,7 @@ class LifetimesOf ty where
     => ty -> Set Lt
 
 instance LifetimesOf ty => LifetimesOf [ty] where
-  ltsOf tys = fold $ ltsOf <$> tys
+  ltsOf = foldMap ltsOf
 
 instance LifetimesOf TySchema where
   ltsOf MkTySchema{ ltParams, tyParams, ty } =

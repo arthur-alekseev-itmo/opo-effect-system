@@ -1,0 +1,19 @@
+fun id[lr]<a <: Any'lr>(x: a): a = x
+
+fun compose
+  [la, lb, lc, lf, lg]
+  <a <: Any'la, b <: Any'lb, c <: Any'lc>
+  (f: (b)'lf -> c, g: (a)'lg -> b): (a)'lb+lf+lg -> c =
+  fun(x : a) f(g(x)) 
+
+let rexplicit = compose 
+  [free, free, free, free, free] 
+  <Any'free, Any'free, Any'free> 
+  (fun (x: Any'free) id[free]<Any'free>(x), fun (x: Any'free) id[free]<Any'free>(x))
+
+let rltinfer = compose
+  <Any'free, Any'free, Any'free>
+  (fun (x: Any'free) id<Any'free>(x), fun (x: Any'free) id<Any'free>(x))
+
+let rtyinfer = compose
+  (fun (x: Any'free) id(x), fun (x: Any'free) id(x))

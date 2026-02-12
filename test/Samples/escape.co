@@ -1,0 +1,12 @@
+data LocalUnit = LocalUnit[ll]
+
+fun localUnit(): LocalUnit'local = LocalUnit[local]()
+
+fun ignoreLocal<a <: Any'lf>(x: a): Int'free = 
+  let ignoredValue: LocalUnit'local = localUnit() in
+  let ignoredArgument: LocalUnit'local = localUnit() in
+  3
+
+let rexplicit = ignoreLocal[local]<LocalUnit'local>(localUnit())
+let rltinfer = ignoreLocal<LocalUnit'local>(localUnit())
+let rtyinfer = ignoreLocal(localUnit())

@@ -1,0 +1,11 @@
+fun id[lr]<a <: Any'lr>(x: a): a = x
+
+fun apply
+  [lf, lx, lr]
+  <a <: Any'la, r <: Any'lr>
+  (f: (a)'lf -> r, x: a): r =
+  f(x)
+
+let explicit = apply[free, free, free]<Int'free, Int'free>(fun(x: Int'free) id<Int'free>(x), 3)
+let rltinfer = apply<Int'free, Int'free>(fun(x: Int'free) id<Int'free>(x), 3)
+let rtyinfer = apply(fun(x: Int'free) id(x), 3)

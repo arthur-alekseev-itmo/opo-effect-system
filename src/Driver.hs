@@ -62,7 +62,7 @@ typecheck effCtx tyCtx prog = fold . reverse <$> flip evalStateT tyCtx do
     VarDecl MkVarDecl{ name, body, expectedTy } -> do
       tyCtx <- get
       let ?tyCtx = tyCtx
-      tySchema <- runExceptT (runFreshT $ inferExpr body) >>= either error pure
+      (tySchema, _) <- runExceptT (runFreshT $ inferExpr body) >>= either error pure
       when (isJust expectedTy && not (tySchema `subTySchemaOf` fromJust expectedTy)) $
         liftIO $ throwIO $ userError $
           "Unexpected type for '" <> name <> "':\n" <> show tySchema <> "\n not subtype of \n" <> show (fromJust expectedTy)
@@ -81,10 +81,10 @@ typecheck effCtx tyCtx prog = fold . reverse <$> flip evalStateT tyCtx do
       let currFun = TyCtxVar MkTyCtxVar { name, tySchema = expectedTy }
       tyCtx <- get
       let ?tyCtx = currFun : tyCtx
-      let expr = TLam MkTLam { ltParams, tyParams, body = Lam MkLam { ctxParams, params, body } }
-      tySchema <- runExceptT (runFreshT (inferExpr expr)) >>= either error pure
+      let expr = untyped $ TLam MkTLam { ltParams, tyParams, body = untyped $ Lam MkLam { ctxParams, params, body } }
+      (tySchema, _) <- runExceptT (runFreshT (inferExpr expr)) >>= either error pure
       let actualResTy = #ty % _TyFun % #res `preview` tySchema
-      unless (actualResTy == Just resTy) $
+      unless (maybe False (`subTyOf` resTy) actualResTy) $
         liftIO $ throwIO $ userError $
           "Result type mispatch: expected " <> show resTy <> " but got " <> show actualResTy
       modify (currFun :)
